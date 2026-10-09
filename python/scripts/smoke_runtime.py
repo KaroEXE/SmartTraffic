@@ -1,6 +1,8 @@
-"""Run real CUDA tracking and HTTP MJPEG against four supplied local videos.
+"""Run real YOLO tracking and HTTP MJPEG against four supplied local videos.
 
-Usage: python scripts/smoke_runtime.py
+Usage: python scripts/smoke_runtime.py [--sources N S W E]
+Inference uses the configured YOLO_DEVICE ("auto": CUDA device 0 if PyTorch
+reports CUDA, otherwise CPU); the device actually used is reported.
 Only smoke-test configuration is overridden; .env and inference settings stay intact.
 Roboflow HTTP is disabled explicitly for this offline test.
 """
@@ -24,7 +26,6 @@ sys.path.insert(0, str(ROOT))
 def main():
     import cv2
     import numpy as np
-    import torch
     import ultralytics
     from werkzeug.serving import make_server
 
@@ -38,8 +39,8 @@ def main():
     parser.add_argument("--sources", nargs=4, default=config.videos,
                         help="Override the configured sources for this smoke test only")
     args = parser.parse_args()
-    if not torch.cuda.is_available():
-        raise RuntimeError("This preserved pipeline requires CUDA device 0; no CPU substitution")
+    # Raises if YOLO_DEVICE explicitly requests CUDA that PyTorch cannot see.
+    device = pipeline.resolve_device()
     for source in args.sources:
         if not config.project_path(source).is_file():
             raise FileNotFoundError("A smoke-test input video is missing")
@@ -128,7 +129,7 @@ def main():
             assert not worker.is_alive() and not failures
             assert shared.health()["pipeline_status"] == "stopped"
             assert all(c["status"] == "released" for c in shared.cameras()["cameras"])
-            report = {"cuda": True, "models": len(models), "independent_trackers": 4,
+            report = {"device": str(device), "models": len(models), "independent_trackers": 4,
                       "tracker_frame_ids": [t.frame_id for t in trackers],
                       "simultaneous_viewers": len(images), "jpeg_dimensions": [640, 480],
                       "live_updates": True, "shutdown": "passed", "roboflow": "disabled for offline smoke",

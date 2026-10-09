@@ -22,7 +22,10 @@ _ENV_NAMES = (
     "ROBOFLOW_TIMEOUT",
     "MODEL_PATH", "VIDEO_NORTH", "VIDEO_SOUTH", "VIDEO_WEST", "VIDEO_EAST",
     "FLASK_HOST", "FLASK_PORT", "ALLOWED_ORIGINS", "DISPLAY_FPS",
-    "JPEG_QUALITY", "FRAME_STALE_SECONDS",
+    "JPEG_QUALITY", "FRAME_STALE_SECONDS", "MAX_STREAM_CLIENTS",
+    "YOLO_DEVICE", "PIPELINE_RESTART_SECONDS", "LOG_LEVEL",
+    "BACKEND_URL", "INTERSECTION_ID", "TRAFFIC_INGEST_TOKEN",
+    "BACKEND_PUBLISH_INTERVAL", "BACKEND_TIMEOUT",
 )
 
 def _load_environment():
@@ -39,6 +42,17 @@ def _load_environment():
 
 def _value(name, default):
     return os.environ.get(name, "").strip() or default
+
+
+def env_number(name, default, kind=float):
+    """Parse a numeric environment value, naming the variable on failure."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return kind(default)
+    try:
+        return kind(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a number") from None
 
 
 def _timeout():
@@ -70,6 +84,9 @@ ROBOFLOW_TIMEOUT = _timeout()
 WORKFLOW_URL = (f"{ROBOFLOW_API_URL}/{quote(ROBOFLOW_WORKSPACE, safe='')}/workflows/"
                 f"{quote(ROBOFLOW_WORKFLOW_ID, safe='')}")
 MODEL_PATH = project_path(_value("MODEL_PATH", "AI-models/yolo26n.pt"))
+# "auto" selects CUDA device 0 when PyTorch reports CUDA, otherwise the CPU.
+# Explicit values ("0", "cpu", "cuda:0") are passed to Ultralytics unchanged.
+YOLO_DEVICE = _value("YOLO_DEVICE", "auto")
 
 
 # EDIT VIDEO SOURCES HERE for BOTH main.py and yooFinalMaybe.py.

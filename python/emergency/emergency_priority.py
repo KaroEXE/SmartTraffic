@@ -206,12 +206,15 @@ class _RoadEvidence:
     cooldown_until: float = -math.inf
     detections: tuple = ()
     status: str = "WAITING"
+    # Highest confidence in the latest positive sample; 0 once evidence clears.
+    confidence: float = 0.0
 
     def clear(self):
         self.hits = 0
         self.last_positive = -math.inf
         self.confirmed_at = None
         self.detections = ()
+        self.confidence = 0.0
 
 
 class EmergencyPriority:
@@ -251,6 +254,7 @@ class EmergencyPriority:
             road.confirmed_at = None
         road.hits += 1
         road.last_positive = result.captured_at
+        road.confidence = max(detection.confidence for detection in result.detections)
         road.status = f"HITS {min(road.hits, self.settings.confirmations)}/{self.settings.confirmations}"
         if road.hits >= self.settings.confirmations and road.confirmed_at is None:
             road.confirmed_at = result.captured_at

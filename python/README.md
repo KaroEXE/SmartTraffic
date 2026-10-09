@@ -3,14 +3,17 @@
 A Python traffic-intersection research/demo using four video inputs, Ultralytics
 YOLO/ByteTrack, stopped-vehicle scoring, adaptive signal selection, fixed-cycle
 fallback, and optional Roboflow emergency-vehicle priority. Flask exposes the
-existing annotated output and measurements for an existing website or Express backend.
+existing annotated output and measurements, and a background publisher sends
+each new measurement to the SmartTraffic Node.js backend (`POST /api/traffic`).
 
 The project explores adapting green time to confirmed waiting traffic while
 falling back to a fixed sequence when vision is uncertain or no stopped queue exists.
 It does not include physical traffic-light hardware control.
 
 Start with [installation](#installation-windows-powershell), then
-[run commands](#run). Website developers can use the
+[run commands](#run). For Render, the backend contract and the production server,
+see [Render deployment and backend integration](docs/RENDER_DEPLOYMENT.md).
+Website developers can use the
 [dashboard example](examples/dashboard.html) and [Express proxy](examples/express-proxy.cjs).
 Before publishing, follow the [repository review](docs/GITHUB_READINESS.md).
 
@@ -32,7 +35,9 @@ Four sources (NORTH, SOUTH, WEST, EAST)
                  |
         JPEG worker (8 FPS, quality 70 by default)
                  |
-        Flask /video/* and /api/* -> browser or existing Express
+        Flask /video/* and /api/* -> browser
+                 |
+        Backend publisher -> Node.js POST /api/traffic -> decision engine -> Socket.IO
 ```
 
 The AI loop and Flask run in **one process**, with HTTP in a background thread.
@@ -41,8 +46,10 @@ Each accepted frame is encoded once for all viewers. Slow clients skip old frame
 Changing display FPS/quality does not change inference frequency or resolution.
 
 The active loop remains together in `app/pipeline.py` to preserve its coupled
-tracking/controller behavior. It retains `yolo26n.pt`, CUDA device 0, `imgsz=640`,
-`conf=0.25`, persistent `bytetrack.yaml`, and inference every second frame.
+tracking/controller behavior. It retains `yolo26n.pt`, `imgsz=640`, `conf=0.25`,
+persistent `bytetrack.yaml`, and inference every second frame. The device comes
+from `YOLO_DEVICE` (default `auto`: CUDA device 0 when PyTorch reports CUDA,
+otherwise CPU). The device in use is logged and shown in `/api/health`.
 Trusted vehicle threshold is 0.35; reliability uses mean confidence 0.40 and track
 ratio 0.60. Green time is 4–12 seconds, fixed AUTO green 7 seconds, yellow 2 seconds,
 all-red clearance 1 second. Emergency settings remain in the original policy module.
@@ -61,6 +68,9 @@ app/
   services/
     shared_state.py             # Bounded frames, JPEG worker, synchronized data
     snapshot.py                 # Read-only projection of actual loop values
+    backend_publisher.py        # POSTs measured observations to the Node.js backend
+    runtime.py                  # TrafficService: one supervised pipeline + publisher
+    diagnostics.py              # Error text with URL credentials/tokens removed
 flaskk/
   app.py                       # Factory; never starts inference
   routes.py                    # Read-only JSON/video routes and exact-origin CORS
@@ -77,11 +87,13 @@ tests/                         # Original regression fixtures plus Flask tests
 scripts/                       # Real runtime/input probes and read-only Git review
 examples/                      # Standalone HTML and Express integration examples
 docs/HANDOFF.md                 # Changes, validation evidence, remaining issues
-main.py                        # Combined Flask + AI launcher
+docs/RENDER_DEPLOYMENT.md       # Render settings, backend contract, verification
+main.py                        # Combined Flask + AI launcher (local, Werkzeug)
+wsgi.py, gunicorn.conf.py      # Production entry point: gunicorn, one worker
 run.ps1                        # Launcher that explicitly selects the project .venv
 yooFinalMaybe.py                # Backwards-compatible desktop-only launcher
 .env.example, .gitignore
-requirements*.txt, pyproject.toml
+requirements*.txt, pyproject.toml  # requirements-render.txt: Linux/CPU server set
 ```
 
 No dataset directory or frontend source was supplied. Historical source copies
@@ -91,10 +103,10 @@ are explained in [legacy/README.md](legacy/README.md); the `controller/` and
 ## Installation (Windows PowerShell)
 
 The supplied dependency pins match the existing **Python 3.14, Windows x64,
-PyTorch 2.11.0+cu128** environment. An NVIDIA GPU compatible with that environment
-is required by the unchanged `device=0` inference configuration. Other Python/OS
-combinations and CPU execution have not been validated. No environment packages
-were upgraded or reinstalled by this refactor; Flask 3.1.3 was already installed.
+PyTorch 2.11.0+cu128** environment, which uses the NVIDIA GPU through
+`YOLO_DEVICE=auto`. `requirements-render.txt` holds the same versions for Linux
+servers with CPU-only PyTorch, headless OpenCV and gunicorn. That set and the
+test suite were also run on Python 3.12 (CPU).
 
 If using the existing environment:
 
@@ -146,6 +158,13 @@ disabled placeholder until you explicitly configure the root key.
 | `ROBOFLOW_API_KEY` | Optional private key; blank/placeholder disables sampling |
 | `ROBOFLOW_WORKSPACE`, `ROBOFLOW_WORKFLOW_ID` | Existing workflow defaults; configure your own workflow when sharing |
 | `ROBOFLOW_API_URL`, `ROBOFLOW_TIMEOUT` | Existing serverless base URL and 4-second timeout |
+| `YOLO_DEVICE` | `auto` (CUDA device 0 if available, else CPU); or `cpu`, `0`, `cuda:0`. An explicit CUDA request fails if CUDA is missing |
+| `MAX_STREAM_CLIENTS` | `8` simultaneous `/video/*` viewers; extra viewers get 503 |
+| `BACKEND_URL` | Empty disables publishing; for example `http://127.0.0.1:3000` |
+| `INTERSECTION_ID` | `main`; an id from the backend's `config/intersections.js` |
+| `TRAFFIC_INGEST_TOKEN` | Empty by default; same secret as the backend's `TRAFFIC_INGEST_TOKEN` |
+| `BACKEND_PUBLISH_INTERVAL`, `BACKEND_TIMEOUT` | `1` and `5` seconds |
+| `PIPELINE_RESTART_SECONDS`, `LOG_LEVEL` | Production server (`wsgi.py`) only: `10` (0 disables), `INFO` |
 
 Keep the **same** model weight at `AI-models/yolo26n.pt`, or explicitly set
 `MODEL_PATH` to your copy of that file. The existing checkout has this 5.54 MB
@@ -154,7 +173,10 @@ separately if appropriate (for example, a release asset with its license and che
 Never substitute another model automatically; startup fails if the path is missing.
 Other weights and training outputs are not used by the active loop.
 The exact required checksum and acquisition instructions are in
-[AI-models/README.md](AI-models/README.md).
+[AI-models/README.md](AI-models/README.md). If the file is missing,
+`python scripts/fetch_model.py` downloads Ultralytics' official release asset and
+keeps it only if its SHA-256 matches that checksum; an existing different file
+is never replaced. The Render build runs the same command.
 
 Video paths also resolve from the repository root. Examples:
 
@@ -209,15 +231,27 @@ The original desktop-only command still works:
 python yooFinalMaybe.py
 ```
 
-Choose one launcher. Do **not** run both simultaneously, start `flask run`, use
-the Flask debug reloader, or launch multiple WSGI workers: they would not share
-these ordinary in-process buffers. Imports and `create_app(shared)` do not start
-cameras/models. No separate Flask process is needed.
+Production server on Linux (Render), with exactly one worker process:
 
-`q` closes the desktop loop. In combined mode, EOF, a failed camera read, `q`, or
-an inference error stops the AI loop and leaves HTTP running for diagnostics.
-Press Ctrl+C to shut down the combined process. As in the original program,
-one failed/ended input stops all four inputs; there is no automatic reconnect.
+```bash
+gunicorn --config gunicorn.conf.py --bind 0.0.0.0:$PORT wsgi:app
+```
+
+Choose one launcher. Do **not** run several simultaneously, start `flask run`,
+use the Flask debug reloader, or run more than one WSGI worker or instance:
+each would start its own cameras and models, because these buffers live in
+process memory. Imports, `create_app(shared)` and `import wsgi` do not start
+cameras or models. No separate Flask process is needed.
+
+When `BACKEND_URL` is set, both launchers post each new measurement to the
+backend. See the [integration contract](docs/RENDER_DEPLOYMENT.md#integration-contract).
+
+`q` closes the desktop loop. In `main.py`, EOF, a failed camera read, `q`, or an
+inference error stops the AI loop and leaves HTTP running for diagnostics.
+Press Ctrl+C to shut down the combined process. One failed or ended input stops
+all four inputs. The production server (`wsgi.py`) restarts the whole pipeline
+after `PIPELINE_RESTART_SECONDS` instead, with growing backoff while failures
+repeat, so a video file loops and a dropped stream is retried.
 Native network/capture operations may delay interruption while blocked.
 
 ## HTTP API
@@ -232,12 +266,17 @@ Base URL: `http://127.0.0.1:5000`.
 | GET | `/video/east` | Annotated east MJPEG |
 | GET | `/api/traffic` | Published measurement/controller snapshot |
 | GET | `/api/cameras` | Direction, status, freshness, stream URL |
-| GET | `/api/health` | 200 when all streams/data are ready; otherwise 503 |
+| GET | `/api/health` | Readiness: 200 when all streams/data are ready; otherwise 503 |
+| GET | `/api/health/live` | Liveness: always 200 while the web process answers |
 
 No control-changing API exists. Streams return 503 with `Retry-After: 2` before
-the first annotated frame, on expiry, or after shutdown; unknown directions give
+the first annotated frame, on expiry, or after shutdown, and 503 with
+`Retry-After: 5` beyond `MAX_STREAM_CLIENTS` viewers. Unknown directions give
 404. Existing streams close when no longer available. The browser should retry
-when `/api/cameras` reports availability. All responses disable caching.
+when `/api/cameras` reports availability. All responses disable caching. Errors
+are JSON `{"error": ...}`. `/api/health` also reports `stream_clients` and
+`components`: inference device, pipeline supervisor restarts and last exit,
+and backend publisher state and last error. It never includes tokens.
 
 `/api/traffic` returns `{available, pipeline_status, age_seconds, data}`.
 `data` is null before the first complete loop update. Historical data is retained
@@ -252,8 +291,10 @@ Within `data`:
   `stopped_vehicles` (confirmed stopped only), `stopped_score` (existing weighted
   waiting score), `priority_score` (stopped score + waiting cycles * 1.5),
   `wait_cycles`, `reliable`, `vision_status`, `average_confidence`, `tracking_ratio`,
-  `signal`, `measured_at`, `frames_read`, `emergency_status`, and
-  `emergency_detections` with normalized sampled `xyxy` coordinates.
+  `signal`, `measured_at`, `frames_read`, `emergency_status`,
+  `emergency_detections` with normalized sampled `xyxy` coordinates, and
+  `mean_wait_seconds` / `max_wait_seconds`: how long the currently STOPPED
+  vehicles have waited, in video seconds (0 when none are stopped).
 - Counts are **current measurement counts**, not cumulative throughput. The
   priority score does not imply eligibility: AI road selection still considers
   only directions with stopped traffic.
@@ -263,9 +304,10 @@ Within `data`:
   `timer_is_estimate`, `fallback_active`, `good_ai_updates`, `bad_ai_updates`.
   AUTO includes startup/no-queue operation, not only degraded vision. The timer
   is a snapshot; emergency expiry or preemption can end green before its estimate.
-- `emergency` exposes `enabled`, `active`, `direction`. `warnings` contains
-  actual camera reliability warnings. Roboflow uncertainty appears in each
-  direction's emergency status. `schema_version` is 1.
+- `emergency` exposes `enabled`, `active`, `direction`, and `confidence` (the
+  latest positive sample's confidence on the confirmed road, else null).
+  `warnings` contains actual camera reliability warnings. Roboflow uncertainty
+  appears in each direction's emergency status. `schema_version` is 1.
 
 Check locally:
 
@@ -279,8 +321,13 @@ Open any `/video/...` URL in a browser to view that feed.
 
 ## Connect your existing website / Express
 
-No existing frontend or Express source was available to edit. Integration is
-manual in your dashboard's existing video elements and data-loading code.
+Structured data reaches the SmartTraffic backend through the publisher (set
+`BACKEND_URL`). The backend's decision engine and Socket.IO then drive the
+dashboard. The contract is in
+[docs/RENDER_DEPLOYMENT.md](docs/RENDER_DEPLOYMENT.md#integration-contract).
+Video is not sent to the backend: browsers load `/video/<direction>` from this
+service directly. The frontend's Live AI view has a `connectLiveVideo(url)`
+hook for that. It is not wired up yet; the frontend was left unchanged.
 The complete working bindings are in [examples/dashboard.html](examples/dashboard.html).
 They discover stream URLs, retry unavailable feeds, and hide stale measurements.
 
@@ -321,11 +368,10 @@ inside your unavailable Express project.
 
 An HTTPS website needs an HTTPS/same-origin proxy; browsers can block HTTP mixed
 content. `127.0.0.1` in browser JavaScript means the **viewer's** computer, not
-your remote AI host. For deployment, put access controls/TLS at your existing
-backend/proxy and keep Flask private. CORS is not authentication.
-The included Werkzeug server is for local integration; follow
-[Flask deployment guidance](https://flask.palletsprojects.com/en/stable/deploying/)
-before hosting it. A production process/IPC design is a separate change.
+your remote AI host. CORS is not authentication. The Werkzeug server in
+`main.py` is for local use. For hosting, use `wsgi.py` with `gunicorn.conf.py`
+(one worker process, threads), as described in
+[docs/RENDER_DEPLOYMENT.md](docs/RENDER_DEPLOYMENT.md).
 
 ## Testing and repository review
 
@@ -343,10 +389,13 @@ findings, and `2` when tracked ignored files or large/binary candidates need rev
 It never stages, removes, or publishes files. Passing it does not replace manual
 review of your staged changes or a decision about the project's license.
 
-The smoke command runs actual CUDA inference on four local files, checks all
-HTTP streams with six simultaneous viewers and live JSON updates, and releases
-resources. It explicitly disables Roboflow for that test. It writes local
-evidence under ignored `.local/smoke/`. Optional network probes:
+The smoke command runs actual inference on four local files, using the
+`YOLO_DEVICE` it reports (CUDA when available). It checks all HTTP streams with
+six simultaneous viewers and live JSON updates, and releases resources. It
+explicitly disables Roboflow for that test. It writes local evidence under
+ignored `.local/smoke/`. The unit tests cover backend publication against a
+local HTTP server, the service lifecycle, the WSGI import and the gunicorn
+hooks, without cameras, GPU or network. Optional network probes:
 
 ```powershell
 python scripts/check_inputs.py --live --roboflow
@@ -400,14 +449,27 @@ reviewed history-remediation plan; adding ignore rules does not erase it.
 
 ## Known limitations / future work
 
-- One failed input/EOF stops the complete loop, preserving current behavior.
-  Reconnect/independent camera failure operation needs explicit policy design.
+- One failed input or EOF stops the complete loop. The production server then
+  restarts all four inputs together. Dropping a single camera and continuing
+  with three is not supported: the backend needs all four approaches, and the
+  missing one would have to be invented.
 - Video-time motion estimation uses frame counts and reported FPS, even for live
-  sources. Existing low-FPS/reused-ID issues in the active loop are documented,
-  not silently fixed using the different historical detector.
+  sources. Two issues in the active loop are fixed, matching the tested
+  historical detector, with the recorded baselines unchanged. Stationary vehicles
+  are now counted when measurements are more than 0.6 s apart (sources below
+  about 3.3 FPS). A track ID that returns after the 2 s forget window no longer
+  inherits its old waiting time.
 - No ROI, manual API, cumulative traffic totals, accuracy benchmark, or hardware
   signal actuation is implemented. Adding these changes requires separate testing.
-- No automatic CPU/device fallback or inference-performance tuning was introduced.
+  Without an ROI, vehicles parked in view count as stopped and add waiting time.
+- `yolo26n.pt` is the stock 80-class COCO detector. It has `person` but no
+  emergency classes; the `police car` vehicle weight never matches. Emergency
+  vehicles come only from the optional Roboflow workflow, whose single class
+  cannot tell ambulance, police and fire apart: the backend receives the generic
+  type `emergency`. Pedestrians are not measured (no crosswalk regions), so none
+  are reported to the backend.
+- Accuracy depends on the camera view. In local tests the COCO model missed
+  vehicles in strict top-down footage.
 - Native capture/HTTP operations have their existing blocking characteristics;
   display buffering alone does not solve input latency or inference bottlenecks.
 - Validate real-world scene accuracy, long-running stability, synchronized live

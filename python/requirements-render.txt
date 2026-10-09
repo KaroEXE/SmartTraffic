@@ -1,0 +1,19 @@
+# Render / Linux x86_64 / CPU-only deployment (Python 3.12).
+# Same library versions as requirements.txt, with two server-side substitutions:
+#   - CPU PyTorch wheels: Render has no GPU, and the CUDA builds are several GB.
+#   - Headless OpenCV: the GUI build needs libGL, which Render's native runtime lacks.
+# ultralytics-opencv-headless installs the identical `ultralytics` package, but
+# depends on opencv-python-headless instead of opencv-python.
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==2.3.5
+opencv-python-headless==5.0.0.93
+ultralytics-opencv-headless==8.4.162
+torch==2.11.0+cpu
+torchvision==0.26.0+cpu
+yt-dlp==2026.8.19
+python-dotenv==1.2.4
+# ByteTrack needs lap even though Ultralytics does not require it by default.
+lap==0.5.13
+Flask==3.1.3
+# Linux-only WSGI server. Run exactly one worker process (see gunicorn.conf.py).
+gunicorn==23.0.0

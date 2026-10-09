@@ -4,6 +4,7 @@ The tightly coupled decision loop is intentionally kept together. Do not replace
 it with the older experimental modules without a separate behavioral review.
 """
 
+import logging
 import math
 import time
 from collections import deque
@@ -12,13 +13,34 @@ import cv2
 import numpy as np
 
 from app.services.snapshot import build_snapshot
-from config.config import MODEL_PATH, names, videos
+from config.config import MODEL_PATH, YOLO_DEVICE, names, videos
 from emergency.emergency_priority import (
     EmergencyPriority,
     EmergencySettings,
     RoboflowSampler,
 )
 from video_work.video_io import open_video
+
+log = logging.getLogger(__name__)
+
+
+def resolve_device(setting=YOLO_DEVICE):
+    """Map YOLO_DEVICE to an Ultralytics device without inventing a GPU.
+
+    "auto" uses CUDA device 0 only when PyTorch reports CUDA, else the CPU.
+    An explicit CUDA request fails here, before any camera is opened.
+    """
+    import torch
+
+    value = str(setting).strip().lower()
+    if value in ("", "auto"):
+        return 0 if torch.cuda.is_available() else "cpu"
+    if value in ("cpu", "mps"):
+        return value
+    if not torch.cuda.is_available():
+        raise RuntimeError("YOLO_DEVICE requests CUDA, but PyTorch reports no CUDA device; "
+                           "set YOLO_DEVICE=cpu or auto")
+    return int(value) if value.isdigit() else value
 
 
 def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
@@ -35,6 +57,10 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
     try:
         if not MODEL_PATH.is_file():
             raise FileNotFoundError("Configured MODEL_PATH is missing; no replacement model downloaded")
+        device = resolve_device()
+        log.info("YOLO inference device: %s", device)
+        if publisher is not None:
+            publisher.report_component("inference", {"device": str(device), "model": MODEL_PATH.name})
         for i, video in enumerate(videos):
             if stop_event is not None and stop_event.is_set():
                 return
@@ -87,6 +113,9 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
             False,
             False
         ]
+
+        # Video time of each camera's previous measurement (motion history).
+        last_measure_times: list[float | None] = [None] * 4
 
 
         # ==================================================
@@ -377,12 +406,15 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
 
                 if did_measure_this_cycle:
 
+                    previous_measure_time = last_measure_times[i]
+                    last_measure_times[i] = video_time
+
                     results = models[i].track(
                         frame,
                         persist=True,
                         imgsz=640,
                         tracker="bytetrack.yaml",
-                        device=0,
+                        device=device,
                         conf=0.25,
                         verbose=False
                     )
@@ -390,6 +422,7 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
 
                     waiting_count = 0
                     waiting_score = 0.0
+                    wait_times = []
 
                     annotated_frame = frame.copy()
 
@@ -542,10 +575,16 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
 
 
                         # --------------------------------------
-                        # CREATE NEW TRACK
+                        # CREATE NEW TRACK OR RESET AN EXPIRED ID
                         # --------------------------------------
 
-                        if track_id not in track_states[i]:
+                        # An ID unseen for longer than TRACK_FORGET_SECONDS is a
+                        # new presence; it must not inherit an old stopped_since.
+                        if (
+                            track_id not in track_states[i]
+                            or video_time - track_states[i][track_id]["last_seen"]
+                            > TRACK_FORGET_SECONDS
+                        ):
 
                             track_states[i][track_id] = {
                                 "history": deque(),
@@ -584,12 +623,18 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
                         )
 
 
-                        # Keep only recent movement history.
+                        # Keep only recent movement history. At low frame rates
+                        # consecutive measurements can be farther apart than the
+                        # window; keep the immediately previous one so stationary
+                        # vehicles can still be measured. Gaps still expire.
                         while (
                             len(history) > 1
                             and history[0][0]
                             < video_time - MOTION_WINDOW_SECONDS
                         ):
+
+                            if len(history) == 2 and history[0][0] == previous_measure_time:
+                                break
 
                             history.popleft()
 
@@ -691,6 +736,7 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
                                 - data["stopped_since"]
                             )
 
+                            wait_times.append(wait_seconds)
 
                             waiting_multiplier = (
                                 1.0
@@ -887,6 +933,9 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
                         "tracked_vehicles": tracked_vehicle_count,
                         "average_confidence": (sum(confidences) / len(confidences)) if confidences else None,
                         "tracking_ratio": tracked_vehicle_count / trusted_vehicle_count if trusted_vehicle_count else None,
+                        # Video-time seconds the currently STOPPED vehicles have waited.
+                        "mean_wait_seconds": sum(wait_times) / len(wait_times) if wait_times else 0.0,
+                        "max_wait_seconds": max(wait_times, default=0.0),
                         "measured_at": time.time(),
                     }
 

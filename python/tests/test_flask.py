@@ -78,7 +78,9 @@ class FlaskTests(unittest.TestCase):
                 first = [next(v.response) for v in viewers]
                 self.assertTrue(all(part == first[0] for part in first))
                 self.assertEqual(encode.call_count, 4)
-                time.sleep(.025)
+                # Clear the 1/60 s display throttle even on a 15.6 ms
+                # monotonic clock (Python 3.12 on Windows).
+                time.sleep(.05)
                 self.publish(20)
                 with self.shared.condition:
                     self.assertTrue(self.shared.condition.wait_for(lambda: self.shared._sequences[0] >= 2, 3))
@@ -138,6 +140,61 @@ class FlaskTests(unittest.TestCase):
 
     def test_display_config_rejects_invalid_values(self):
         for kwargs in ({"display_fps": float("nan")}, {"display_fps": 0}, {"jpeg_quality": 101},
-                       {"allowed_origins": ("*",)}, {"allowed_origins": ("http://localhost:3000/",)}):
+                       {"allowed_origins": ("*",)}, {"allowed_origins": ("http://localhost:3000/",)},
+                       {"max_stream_clients": 0}):
             with self.assertRaises(ValueError):
                 WebSettings(**kwargs)
+
+    def test_invalid_numeric_environment_names_the_variable(self):
+        with patch.dict("os.environ", {"MAX_STREAM_CLIENTS": "many"}), \
+                self.assertRaisesRegex(ValueError, "MAX_STREAM_CLIENTS"):
+            WebSettings.from_env()
+
+    def test_liveness_answers_while_readiness_reports_no_detections(self):
+        self.shared.report_component("supervisor", {"restarts": 2, "last_exit": "RuntimeError"})
+        live = self.client.get("/api/health/live")
+        self.assertEqual(live.status_code, 200)
+        self.assertEqual(live.json, {"service": "smart-traffic-ai", "alive": True, "ready": False,
+                                     "pipeline_status": "not_started", "reason": None})
+        health = self.client.get("/api/health")
+        self.assertEqual(health.status_code, 503)
+        self.assertEqual(health.json["components"]["supervisor"]["last_exit"], "RuntimeError")
+        self.shared.start_encoder()
+        self.publish()
+        self.wait_ready()
+        self.assertEqual(self.client.get("/api/health/live").json["ready"], True)
+
+    def test_unknown_routes_and_methods_return_json(self):
+        missing = self.client.get("/api/nothing")
+        self.assertEqual((missing.status_code, missing.json), (404, {"error": "Not Found"}))
+        wrong = self.client.post("/api/health/live")
+        self.assertEqual((wrong.status_code, wrong.json), (405, {"error": "Method Not Allowed"}))
+        self.assertIn("GET", wrong.headers["Allow"])
+
+    def test_video_viewers_are_capped_and_slots_are_released(self):
+        settings = WebSettings(display_fps=60, max_stream_clients=2)
+        self.shared = SharedState(settings)
+        self.addCleanup(self.shared.close)
+        self.client = create_app(self.shared, settings).test_client()
+        self.shared.start_encoder()
+        self.publish()
+        self.wait_ready()
+        first = self.client.get("/video/north", buffered=False)
+        second = self.client.get("/video/south", buffered=False)
+        try:
+            self.assertEqual((first.status_code, second.status_code), (200, 200))
+            third = self.client.get("/video/west")
+            self.assertEqual(third.status_code, 503)
+            self.assertEqual(third.headers["Retry-After"], "5")
+            self.assertEqual(self.shared.health()["stream_clients"], 2)
+            next(first.response)
+            first.close()  # browser disconnected
+            replacement = self.client.get("/video/west", buffered=False)
+            self.assertEqual(replacement.status_code, 200)
+            replacement.close()
+        finally:
+            second.close()
+        head = self.client.head("/video/east")  # a WSGI server closes it, like here
+        self.assertEqual(head.status_code, 200)
+        head.close()
+        self.assertEqual(self.shared.health()["stream_clients"], 0)
