@@ -1,0 +1,23 @@
+[
+  {
+    "predictions": {
+      "image": {
+        "width": 640,
+        "height": 960
+      },
+      "predictions": [
+        {
+          "width": 504,
+          "height": 643,
+          "x": 273,
+          "y": 615.5,
+          "confidence": 0.8519337177276611,
+          "class_id": 0,
+          "class": "emergency-car",
+          "detection_id": "b1c6007f-91dc-439f-9da5-38dca944c185",
+          "parent_id": "image"
+        }
+      ]
+    }
+  }
+]

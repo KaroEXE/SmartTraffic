@@ -1,0 +1,305 @@
+{
+  "empty": {
+    "trace_sha256": "93f319294af1272dbb63d5f249a9496a7625a6df53b25cff4f186d6859154ad8",
+    "stdout_sha256": "6fb65878110690ef262d1607563c91f986654316a01c41bf1a3bec250d9012a4",
+    "frames": [
+      97,
+      97,
+      97,
+      97
+    ],
+    "released": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "models": [
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      }
+    ],
+    "phases": [
+      "ALL_RED",
+      "GREEN",
+      "YELLOW"
+    ],
+    "modes": [
+      "AUTO"
+    ],
+    "priorities": []
+  },
+  "traffic": {
+    "trace_sha256": "9f62103d3d6b04b519ae2799573cad3584566c59323790c2e759a40bd8f3e1b8",
+    "stdout_sha256": "b5f93a40d1bcb480af1d87ad359f48a3e1b3b7b556202b4d82da50922807c00b",
+    "frames": [
+      97,
+      97,
+      97,
+      97
+    ],
+    "released": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "models": [
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      }
+    ],
+    "phases": [
+      "ALL_RED",
+      "GREEN",
+      "YELLOW"
+    ],
+    "modes": [
+      "AUTO"
+    ],
+    "priorities": []
+  },
+  "adaptive": {
+    "trace_sha256": "6bba0ba40219d234da69caa50d9570b99e862542cd0d77af4f3c5d24794fea67",
+    "stdout_sha256": "9830c605b74712231929fb135e330307f1792ad75958d26257b78abef702d963",
+    "frames": [
+      97,
+      97,
+      97,
+      97
+    ],
+    "released": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "models": [
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      }
+    ],
+    "phases": [
+      "ALL_RED",
+      "GREEN",
+      "YELLOW"
+    ],
+    "modes": [
+      "AI",
+      "AUTO"
+    ],
+    "priorities": []
+  },
+  "emergency": {
+    "trace_sha256": "2b69e767d81a6fa98be9fbbb2228c499344871afe964f2a1f09b3da9ce40cff1",
+    "stdout_sha256": "52cb158f3a3984178f3a496806e9be2db587cc2aec8c7273223d58a1f1ec3f1c",
+    "frames": [
+      97,
+      97,
+      97,
+      97
+    ],
+    "released": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "models": [
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      },
+      {
+        "weight": "yolo26n.pt",
+        "calls": 48,
+        "options": {
+          "persist": true,
+          "imgsz": 640,
+          "tracker": "bytetrack.yaml",
+          "device": 0,
+          "conf": 0.25,
+          "verbose": false
+        }
+      }
+    ],
+    "phases": [
+      "ALL_RED",
+      "GREEN",
+      "YELLOW"
+    ],
+    "modes": [
+      "AUTO"
+    ],
+    "priorities": [
+      2
+    ]
+  }
+}

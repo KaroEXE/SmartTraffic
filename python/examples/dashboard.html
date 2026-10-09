@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Traffic AI connection example</title>
+<h1>Traffic AI connection example</h1>
+<p>This is a standalone integration example. Copy the bindings into your existing dashboard.</p>
+<div id="feeds">
+  <img id="north" alt="North annotated feed" width="320">
+  <img id="south" alt="South annotated feed" width="320">
+  <img id="west" alt="West annotated feed" width="320">
+  <img id="east" alt="East annotated feed" width="320">
+</div>
+<p id="status">Connecting…</p>
+<pre id="traffic"></pre>
+<script>
+// For the Express example use const BASE = "/ai" instead.
+const BASE = "http://127.0.0.1:5000";
+const status = document.getElementById("status");
+const output = document.getElementById("traffic");
+const connected = new Set();
+
+async function poll() {
+  try {
+    const [cameraResponse, trafficResponse] = await Promise.all([
+      fetch(`${BASE}/api/cameras`, { cache: "no-store", signal: AbortSignal.timeout(5000) }),
+      fetch(`${BASE}/api/traffic`, { cache: "no-store", signal: AbortSignal.timeout(5000) })
+    ]);
+    if (!cameraResponse.ok || !trafficResponse.ok) throw new Error("API unavailable");
+    const { cameras } = await cameraResponse.json();
+    const state = await trafficResponse.json();
+    for (const camera of cameras) {
+      const img = document.getElementById(camera.direction);
+      if (!camera.available) {
+        img.removeAttribute("src");
+        connected.delete(camera.direction);
+      } else if (!connected.has(camera.direction)) {
+        connected.add(camera.direction);
+        img.onerror = () => connected.delete(camera.direction);
+        img.src = `${BASE}${camera.stream_url}`;
+      }
+    }
+    if (!state.available || !state.data) {
+      status.textContent = `AI unavailable (${state.pipeline_status}); waiting for fresh data.`;
+      output.textContent = "";
+    } else {
+      const { controller, directions, emergency } = state.data;
+      status.textContent = `Mode: ${controller.effective_mode}; green: ${controller.active_green_direction ?? "none"}`;
+      output.textContent = JSON.stringify({
+        northDetected: directions.north.detected_vehicles,
+        northStopped: directions.north.stopped_vehicles,
+        northStoppedScore: directions.north.stopped_score,
+        northPriority: directions.north.priority_score,
+        remainingSeconds: controller.remaining_seconds,
+        fallback: controller.fallback_active,
+        emergency,
+        directions
+      }, null, 2);
+    }
+  } catch {
+    status.textContent = "Connection unavailable. Retrying…";
+    output.textContent = "";
+    for (const img of document.querySelectorAll("#feeds img")) img.removeAttribute("src");
+    connected.clear();
+  } finally {
+    setTimeout(poll, 1000); // No overlapping polls; API reads never run inference.
+  }
+}
+poll();
+</script>
+</html>
