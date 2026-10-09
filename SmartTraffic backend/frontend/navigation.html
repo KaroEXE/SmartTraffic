@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0c0e">
+  <meta name="description" content="SmartTraffic driver navigation: routes, AI-monitored intersections and road hazards">
+  <title>SmartTraffic Navigation</title>
+  <link rel="manifest" href="navigation/manifest.webmanifest">
+  <link rel="icon" href="navigation/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="navigation/navigation.css">
+</head>
+<body class="nv">
+  <div class="nv-map" id="nv-map" aria-label="Navigation map. Click or tap the map to set a start or destination."></div>
+
+  <!-- ======================================================= search card -->
+  <header class="nv-top" id="nv-top">
+    <form class="nv-search" id="nv-search" role="search" autocomplete="off">
+      <div class="nv-field">
+        <span class="nv-field-label" id="nv-from-label">From</span>
+        <span class="nv-from-value nv-placeholder" id="nv-from-value" aria-live="polite">Choose a start point</span>
+        <button type="button" class="nv-icon-btn" id="nv-from-locate" aria-label="Start from my location" title="Start from my location">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"/><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 1v3M12 20v3M1 12h3M20 12h3" stroke="currentColor" stroke-width="1.8"/></svg>
+        </button>
+        <button type="button" class="nv-icon-btn" id="nv-from-center" aria-label="Start at the map centre" title="Start at the map centre">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 3v6M12 15v6M3 12h6M15 12h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/></svg>
+        </button>
+      </div>
+      <div class="nv-field">
+        <label class="nv-field-label" for="nv-dest">To</label>
+        <input class="nv-input" id="nv-dest" type="search" placeholder="Search destination" enterkeyhint="search"
+               spellcheck="false" aria-controls="nv-results" aria-expanded="false" aria-describedby="nv-search-msg">
+        <button type="submit" class="nv-icon-btn" aria-label="Search destination" title="Search">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.5 15.5L21 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <ul class="nv-results" id="nv-results" role="listbox" aria-label="Search results" hidden></ul>
+      <div class="nv-search-msg" id="nv-search-msg" role="status" hidden></div>
+    </form>
+  </header>
+
+  <!-- ===================================================== map buttons -->
+  <div class="nv-fabs">
+    <button class="nv-fab" id="nv-locate" type="button" aria-label="Show my location" title="Show my location">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M21 3L3 10.5l7.5 3L14 21z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="nv-fab" id="nv-layers-btn" type="button" aria-label="Map layers and legend" title="Map layers and legend" aria-expanded="false" aria-controls="nv-layers">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M3 13l9 5 9-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+    </button>
+  </div>
+
+  <section class="nv-layers" id="nv-layers" aria-label="Map layers and legend" hidden></section>
+
+  <!-- ===================================================== route sheet -->
+  <section class="nv-sheet" id="nv-sheet" aria-label="Routes">
+    <button class="nv-sheet-handle" id="nv-sheet-toggle" type="button" aria-expanded="true" aria-controls="nv-sheet-body">
+      <span class="nv-grip" aria-hidden="true"></span>
+      <span class="nv-sheet-title">Routes</span>
+    </button>
+    <div class="nv-feed" id="nv-feed" role="status"></div>
+    <div class="nv-sheet-body" id="nv-sheet-body"></div>
+    <div class="nv-sheet-foot"><a href="/">Operator dashboard</a></div>
+  </section>
+
+  <div class="nv-banner" id="nv-offline" role="alert" hidden>You are offline. Map tiles, search and routing need an internet connection.</div>
+  <div class="nv-toast" id="nv-toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script type="module" src="navigation/navApp.js"></script>
+</body>
+</html>
