@@ -13,6 +13,7 @@ const { createSimulationService } = require('./services/simulationService');
 const { createTrafficController } = require('./controllers/trafficController');
 const { createSimulationController } = require('./controllers/simulationController');
 const { createTrafficRoutes, createSimulationRoutes } = require('./routes/trafficRoutes');
+const { createDocsRoutes } = require('./routes/docsRoutes');
 const { initTrafficSocket } = require('./socket/trafficSocket');
 
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
@@ -57,6 +58,13 @@ const simulationReadController = createTrafficController(simulation.engine, { st
 app.use(cors({ origin: config.corsOrigin }));
 app.use(express.json({ limit: '100kb' }));
 
+// Settings the browser needs. Only public values - never secrets.
+app.get('/api/client-config', (req, res) => {
+  res.json({ ok: true, aiStreamUrl: config.aiStreamUrl || null });
+});
+
+app.use('/api', createDocsRoutes());
+
 app.use('/api/simulation', createSimulationRoutes(simulationReadController, createSimulationController(simulation)));
 app.use('/api', createTrafficRoutes(controller));
 app.use('/api', (req, res) => res.status(404).json({ ok: false, error: `No route ${req.method} ${req.originalUrl}` }));
@@ -93,6 +101,7 @@ server.on('error', (err) => {
 server.listen(config.port, () => {
   console.log('');
   console.log('  Smart Traffic AI - control backend (simulation prototype)');
+  console.log(`  Swagger     http://localhost:${config.port}/api/docs/`);
   console.log(`  Dashboard   http://localhost:${config.port}`);
   console.log(`  API         http://localhost:${config.port}/api/health`);
   console.log(`  Ingest      POST http://localhost:${config.port}/api/traffic`);

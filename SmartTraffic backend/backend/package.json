@@ -21,6 +21,7 @@
     "leaflet": "^1.9.4",
     "mongoose": "^8.24.5",
     "socket.io": "^4.8.1",
+    "swagger-ui-dist": "^5.33.1",
     "three": "^0.169.0"
   }
 }

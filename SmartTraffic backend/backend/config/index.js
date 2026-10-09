@@ -13,11 +13,26 @@ function num(name, fallback) {
   return value;
 }
 
+function httpUrl(name) {
+  const raw = (process.env[name] || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    if (url.protocol === 'http:' || url.protocol === 'https:') return url.href;
+  } catch { /* reported below */ }
+  console.warn(`[config] ${name} is not a valid http(s) URL - ignored`);
+  return '';
+}
+
 const config = {
   port: num('PORT', 3000),
   corsOrigin: process.env.CORS_ORIGIN || '*',
   // Historical data store. Never log this value: it may contain credentials.
   mongodbUri: (process.env.MONGODB_URI || '').trim(),
+  // Python/Flask camera stream shown on the dashboard's Live AI page, e.g.
+  // http://<flask-host>:5000/video_feed. Sent to browsers, so never put
+  // credentials in it. Empty = the page shows "not connected".
+  aiStreamUrl: httpUrl('AI_STREAM_URL'),
 
   weights: {
     vehicles: num('WEIGHT_VEHICLES', 2),
