@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Smart Traffic AI - Signal Operations</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/vendor/three/build/three.module.js",
+        "three/addons/": "/vendor/three/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div class="app">
+
+    <!-- ============================================================ header -->
+    <header class="topbar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="7" y="1.5" width="10" height="21" rx="2"></rect>
+          <circle cx="12" cy="6.5" r="2"></circle>
+          <circle cx="12" cy="12" r="2"></circle>
+          <circle cx="12" cy="17.5" r="2" class="on"></circle>
+        </svg>
+        <div>
+          <div class="brand-name">SMART TRAFFIC AI</div>
+          <div class="brand-sub">Adaptive signal control &middot; simulation prototype</div>
+        </div>
+      </div>
+
+      <nav class="view-tabs" role="tablist" aria-label="Views">
+        <button class="view-tab active" type="button" role="tab" data-view="operations" aria-selected="true">Operations</button>
+        <button class="view-tab" type="button" role="tab" data-view="live-ai" aria-selected="false" aria-controls="live-ai">Live AI</button>
+      </nav>
+      <a class="view-link" href="navigation.html" aria-label="Driver navigation" title="Driver navigation">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M21 3L3 10.5l7.5 3L14 21z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        <span class="view-link-text">Navigation</span>
+      </a>
+
+      <!-- Data source for the Operations view. Live = real perception data;
+           Simulation = generated data, never shown as real traffic. -->
+      <div class="mode-switch" role="tablist" aria-label="Data source">
+        <button class="mode-btn active" type="button" role="tab" data-mode="live" aria-selected="true">Live traffic</button>
+        <button class="mode-btn" type="button" role="tab" data-mode="simulation" aria-selected="false">Simulation</button>
+      </div>
+
+      <div class="topbar-ix">
+        <span class="eyebrow">Active intersection</span>
+        <span class="topbar-ix-name" id="tb-name">-</span>
+        <span class="topbar-ix-id mono" id="tb-id"></span>
+      </div>
+
+      <div class="topbar-status">
+        <div class="status-pill" id="tb-system"><span class="dot"></span><span class="txt">CONNECTING</span></div>
+        <div class="status-pill" id="tb-feeds"><span class="dot"></span><span class="txt">AI FEEDS -</span></div>
+        <div class="clock mono" id="clock">--:--:--</div>
+      </div>
+    </header>
+
+    <!-- ======================================================= left column -->
+    <aside class="col-left">
+      <section class="block block-map">
+        <div class="block-head">
+          <h2>Network map</h2>
+          <span class="meta">OpenStreetMap</span>
+        </div>
+        <div class="map" id="map"></div>
+      </section>
+
+      <section class="block block-list">
+        <div class="block-head">
+          <h2>Intersections</h2>
+          <span class="meta" id="ix-count"></span>
+        </div>
+        <ul class="ix-list" id="ix-list"></ul>
+      </section>
+    </aside>
+
+    <!-- ============================================================ center -->
+    <main class="col-center">
+      <div class="viewport" id="viewport">
+        <div class="vp-tags" id="vp-tags"></div>
+
+        <div class="vp-head">
+          <div class="vp-title" id="vp-title">-</div>
+          <div class="vp-sub mono" id="vp-sub"></div>
+          <div class="mode-badge" id="mode-badge" hidden>SIMULATED DATA - NOT REAL TRAFFIC</div>
+        </div>
+
+        <div class="vp-alerts">
+          <div class="alert alert-emergency" id="vp-emergency" hidden>
+            <span class="alert-mark"></span>
+            <span class="alert-title">EMERGENCY PRIORITY</span>
+            <span class="alert-body" id="vp-emergency-body"></span>
+          </div>
+          <div class="alert alert-ped" id="vp-ped" hidden>
+            <span class="alert-mark"></span>
+            <span class="alert-title">PEDESTRIAN CROSSING</span>
+            <span class="alert-body" id="vp-ped-body"></span>
+          </div>
+        </div>
+
+        <div class="vp-tools">
+          <div class="compass" id="compass" title="North">
+            <span class="compass-n">N</span>
+            <span class="compass-needle"></span>
+          </div>
+          <button class="tool-btn" id="reset-view" type="button" title="Reset camera">Reset view</button>
+        </div>
+
+        <div class="vp-legend">
+          <span><i class="lg lg-green"></i>Green</span>
+          <span><i class="lg lg-yellow"></i>Yellow</span>
+          <span><i class="lg lg-red"></i>Red</span>
+          <span class="vp-hint">Drag to orbit &middot; scroll to zoom &middot; right-drag to pan</span>
+        </div>
+
+        <div class="vp-fallback" id="vp-fallback" hidden>3D view unavailable: WebGL is not supported in this browser.</div>
+      </div>
+
+      <section class="approaches" id="approaches" aria-label="Approach statistics"></section>
+    </main>
+
+    <!-- ======================================================= right column -->
+    <aside class="col-right">
+      <section class="block">
+        <div class="block-head"><h2>Current decision</h2><span class="meta mono" id="dec-phase"></span></div>
+        <dl class="decision">
+          <div class="kv">
+            <dt>Mode</dt>
+            <dd><span class="big" id="dec-mode">-</span><span class="sub" id="dec-mode-sub"></span></dd>
+          </div>
+          <div class="kv">
+            <dt id="dec-active-label">Active signal</dt>
+            <dd><span class="big" id="dec-active">-</span><span class="sub" id="dec-active-sub"></span></dd>
+          </div>
+          <div class="kv">
+            <dt>Remaining</dt>
+            <dd>
+              <span class="big mono" id="dec-remaining">-</span>
+              <div class="progress"><span id="dec-progress"></span></div>
+            </dd>
+          </div>
+          <div class="kv kv-wide">
+            <dt>Reason</dt>
+            <dd class="reason" id="dec-reason">-</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="block">
+        <div class="block-head"><h2>Signal heads</h2><span class="meta">Veh &middot; Ped</span></div>
+        <ul class="signal-list" id="signal-list"></ul>
+      </section>
+
+      <section class="block">
+        <div class="block-head"><h2>Emergency</h2></div>
+        <div class="emergency" id="emergency"></div>
+      </section>
+
+      <section class="block">
+        <div class="block-head"><h2>System</h2></div>
+        <dl class="sys">
+          <div><dt>System</dt><dd id="sys-system">-</dd></div>
+          <div><dt>AI data</dt><dd id="sys-ai">-</dd></div>
+          <div><dt>Last update</dt><dd class="mono" id="sys-last">-</dd></div>
+          <div><dt>Updates</dt><dd class="mono" id="sys-count">-</dd></div>
+        </dl>
+      </section>
+    </aside>
+
+    <!-- ============================================================ events -->
+    <footer class="events">
+      <div class="events-main">
+        <div class="block-head">
+          <h2>Event stream</h2>
+          <span class="meta" id="ev-scope"></span>
+        </div>
+        <div class="event-list" id="event-list" role="log" aria-live="polite"></div>
+      </div>
+
+      <!-- Shown only in Simulation mode; controls /api/simulation only -->
+      <section class="sim" id="sim" hidden>
+        <div class="block-head">
+          <h2>Simulation <span class="sim-state" id="sim-state">STOPPED</span></h2>
+          <label class="sim-tour"><input type="checkbox" id="sim-tour"> Auto tour</label>
+        </div>
+        <div class="sim-run">
+          <button class="run-btn" type="button" id="sim-start">Start</button>
+          <button class="run-btn" type="button" id="sim-pause" disabled>Pause</button>
+          <button class="run-btn" type="button" id="sim-reset" disabled>Reset</button>
+        </div>
+        <div class="sim-grid" id="sim-grid"></div>
+      </section>
+    </footer>
+
+    <!-- ========================================================== live AI -->
+    <!-- What the AI camera sees. Placeholder until the Python/Flask service
+         is connected - see frontend/liveAI.js for the integration points. -->
+    <section class="live-ai" id="live-ai" role="tabpanel" aria-label="Live AI" hidden>
+      <div class="lai-main">
+        <div class="lai-camera">
+          <div class="block-head">
+            <h2>Live camera</h2>
+            <span class="meta mono" id="lai-cam-source">No source configured</span>
+          </div>
+          <div class="lai-frame" id="lai-frame">
+            <div class="lai-placeholder" id="lai-placeholder">
+              <svg class="lai-cam-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="2.5" y="6" width="14" height="12" rx="1.5"></rect>
+                <path d="M16.5 10.5l5-3v9l-5-3z"></path>
+              </svg>
+              <div class="lai-ph-title">AI CAMERA FEED</div>
+              <div class="lai-ph-text" id="lai-ph-text">Waiting for camera connection...</div>
+            </div>
+            <!-- connectLiveVideo() mounts the stream element here -->
+            <div class="lai-stream" id="lai-stream"></div>
+          </div>
+        </div>
+
+        <section class="approaches lai-directions" id="lai-directions" aria-label="Detections by direction">
+          <div class="ap" data-dir="north">
+            <div class="ap-head"><span class="lamp"></span><span class="ap-name">NORTH</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+          </div>
+          <div class="ap" data-dir="south">
+            <div class="ap-head"><span class="lamp"></span><span class="ap-name">SOUTH</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+          </div>
+          <div class="ap" data-dir="east">
+            <div class="ap-head"><span class="lamp"></span><span class="ap-name">EAST</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+          </div>
+          <div class="ap" data-dir="west">
+            <div class="ap-head"><span class="lamp"></span><span class="ap-name">WEST</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+          </div>
+        </section>
+      </div>
+
+      <aside class="lai-side">
+        <section class="block">
+          <div class="block-head"><h2>AI status</h2></div>
+          <div class="lai-status" id="lai-status">
+            <span class="dot"></span>
+            <span class="lai-status-label" id="lai-status-label">OFFLINE / NOT CONNECTED</span>
+          </div>
+          <div class="sub" id="lai-status-detail">Waiting for AI connection - placeholder until the Flask service is connected</div>
+        </section>
+
+        <section class="block">
+          <div class="block-head"><h2>Detection summary</h2></div>
+          <dl class="decision lai-summary">
+            <div class="kv"><dt>Vehicles</dt><dd><span class="big mono" id="lai-sum-vehicles">0</span></dd></div>
+            <div class="kv"><dt>Pedestrians</dt><dd><span class="big mono" id="lai-sum-pedestrians">0</span></dd></div>
+            <div class="kv"><dt>Emergency vehicles</dt><dd><span class="big mono" id="lai-sum-emergency">0</span></dd></div>
+            <div class="kv"><dt>AI confidence</dt><dd><span class="big mono" id="lai-sum-confidence">--</span></dd></div>
+          </dl>
+        </section>
+
+        <section class="block">
+          <div class="block-head"><h2>Emergency detection</h2></div>
+          <div class="emergency" id="lai-emergency"></div>
+        </section>
+
+        <section class="block">
+          <div class="block-head"><h2>Pedestrians</h2></div>
+          <div id="lai-pedestrians"></div>
+        </section>
+
+        <section class="block">
+          <div class="block-head"><h2>Camera</h2></div>
+          <dl class="sys lai-camera-info">
+            <div><dt>Status</dt><dd class="mono" id="lai-cam-status">Not connected</dd></div>
+            <div><dt>Source</dt><dd class="mono" id="lai-cam-src">--</dd></div>
+            <div><dt>FPS</dt><dd class="mono" id="lai-cam-fps">--</dd></div>
+            <div><dt>Resolution</dt><dd class="mono" id="lai-cam-res">--</dd></div>
+          </dl>
+        </section>
+      </aside>
+    </section>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

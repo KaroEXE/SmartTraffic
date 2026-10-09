@@ -1,0 +1,14 @@
+{
+  "name": "SmartTraffic Navigation",
+  "short_name": "SmartTraffic",
+  "description": "Driver navigation with AI-monitored intersections and road hazards",
+  "start_url": "/navigation.html",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a0c0e",
+  "theme_color": "#0a0c0e",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

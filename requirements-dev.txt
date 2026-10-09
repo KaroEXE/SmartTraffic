@@ -1,0 +1,4 @@
+-r requirements.txt
+ruff==0.16.10
+mypy==2.4.0
+types-yt-dlp==2026.8.19.20261008
