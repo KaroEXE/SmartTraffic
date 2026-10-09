@@ -46,6 +46,9 @@ class SharedState:
         self._closed = False
         self._thread: threading.Thread | None = None
         self._encoder_error: str | None = None
+        # Status reported by background components (publisher, supervisor, ...).
+        self._components: dict[str, dict] = {}
+        self._stream_clients = 0
 
     def start_encoder(self):
         with self.condition:
@@ -60,6 +63,28 @@ class SharedState:
         with self.condition:
             self._status, self._reason = status, reason
             self.condition.notify_all()
+
+    def report_component(self, name, status):
+        """Replace one component's diagnostic status (JSON-safe, never secrets)."""
+        normalized = json_safe(status)
+        with self.condition:
+            self._components[name] = normalized
+
+    def acquire_stream(self):
+        """Reserve an MJPEG viewer slot; False when closed or at capacity.
+
+        Each stream holds one server thread for its whole lifetime, so the cap
+        keeps threads free for health checks and JSON requests.
+        """
+        with self.condition:
+            if self._closed or self._stream_clients >= self.settings.max_stream_clients:
+                return False
+            self._stream_clients += 1
+            return True
+
+    def release_stream(self):
+        with self.condition:
+            self._stream_clients = max(0, self._stream_clients - 1)
 
     def camera_status(self, index, status):
         with self.condition:
@@ -176,7 +201,9 @@ class SharedState:
             return {"service": "smart-traffic-ai", "ready": ready,
                     "pipeline_status": self._status, "reason": self._reason,
                     "encoder_error": self._encoder_error,
-                    "updated_at": self._snapshot["updated_at"] if self._snapshot else None}
+                    "updated_at": self._snapshot["updated_at"] if self._snapshot else None,
+                    "stream_clients": self._stream_clients,
+                    "components": copy.deepcopy(self._components)}
 
     def finish_pipeline(self):
         with self.condition:

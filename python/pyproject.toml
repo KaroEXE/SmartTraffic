@@ -5,4 +5,4 @@ extend-exclude = [".audit-tools", ".venv-audit"]
 [tool.mypy]
 python_version = "3.14"
 check_untyped_defs = true
-files = ["main.py", "yooFinalMaybe.py", "app", "flaskk", "config", "controller", "detection", "emergency", "video_work", "tests"]
+files = ["main.py", "wsgi.py", "yooFinalMaybe.py", "app", "flaskk", "config", "controller", "detection", "emergency", "video_work", "tests"]

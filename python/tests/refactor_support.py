@@ -13,6 +13,7 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
+import config.config as project_config
 import emergency.emergency_priority as emergency_priority
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -138,11 +139,14 @@ def run_demo(source_path, scenario, publisher=None):
     namespace = {"__name__": "__main__" if publisher is None else "regression_import",
                  "__file__": str(source_path)}
     output = io.StringIO()
+    # Baselines were recorded on a CUDA machine: YOLO_DEVICE=auto resolves to device 0.
     with patch.dict(sys.modules, {"ultralytics": SimpleNamespace(YOLO=Model),
                                   "yt_dlp": SimpleNamespace(YoutubeDL=Downloader)}), \
             patch.object(cv2, "VideoCapture", Camera), patch.object(cv2, "imshow", imshow), \
             patch.object(cv2, "waitKey", wait_key), patch.object(cv2, "destroyAllWindows"), \
             patch.object(emergency_priority, "RoboflowSampler", Sampler), \
+            patch.object(project_config, "YOLO_DEVICE", "auto"), \
+            patch("torch.cuda.is_available", return_value=True), \
             patch("time.monotonic", side_effect=lambda: clock[0]), \
             patch("atexit.register"), contextlib.redirect_stdout(output):
         # Clear cached refactor imports so every run sees the mock YOLO constructor.

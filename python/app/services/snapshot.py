@@ -56,7 +56,10 @@ def build_snapshot(values):
             "bad_ai_updates": values["bad_ai_updates"],
         },
         "emergency": {"enabled": sampler.enabled, "active": policy.target is not None,
-                      "direction": names[policy.target] if policy.target is not None else None},
+                      "direction": names[policy.target] if policy.target is not None else None,
+                      # Latest positive sample on the confirmed road (not a new detection).
+                      "confidence": (policy.roads[policy.target].confidence
+                                     if policy.target is not None else None)},
         "warnings": [f"{names[i]}: {values['camera_status'][i]}" for i in range(4)
                      if not values["camera_reliable"][i]],
     }

@@ -1,5 +1,11 @@
 # Refactor and Flask handoff — 2026-10-09
 
+**Later change:** the production WSGI entry point, backend publisher, Render
+settings and the fixes to the active loop are described in
+[RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md) and the README. Statements below
+about CUDA-only inference, no automatic restart, and no backend connection
+describe the earlier state.
+
 For the latest publication status and the subsequently approved Git-index cleanup,
 see [GitHub readiness](GITHUB_READINESS.md). The audit below records the initial
 refactor state; its original tracked-file and test counts are historical.

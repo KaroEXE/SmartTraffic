@@ -92,6 +92,16 @@ class PolicyTests(unittest.TestCase):
         self.confirm(start=20)
         self.assertIsNone(self.policy.choose(31))
 
+    def test_confirmed_road_keeps_latest_positive_confidence_until_release(self):
+        self.confirm()
+        self.assertEqual(self.policy.choose(4), 2)
+        self.assertAlmostEqual(self.policy.roads[2].confidence, 0.8519337177276611)
+        self.policy.observe(InferenceResult(2, 6), 6)  # negative sample inside the grace period
+        self.assertEqual(self.policy.choose(6), 2)
+        self.assertAlmostEqual(self.policy.roads[2].confidence, 0.8519337177276611)
+        self.assertIsNone(self.policy.choose(10.01))
+        self.assertEqual(self.policy.roads[2].confidence, 0.0)
+
     def test_negative_scene_releases_after_grace(self):
         self.confirm()
         self.policy.observe(InferenceResult(2, 6), 6)
