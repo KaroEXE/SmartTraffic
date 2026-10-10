@@ -4,17 +4,21 @@ import {
   DIRS, LAYOUT, approach, pathPoint, buildStaticIntersection, buildCityBlocks,
 } from './intersection.js';
 import { TrafficLights } from './trafficLights.js';
-import { VehicleSystem } from './vehicles.js';
+import { VehicleSystem, MAX_PER_APPROACH } from './vehicles.js';
 import { PedestrianSystem } from './pedestrians.js';
 
 /**
  * 3D digital twin of the selected intersection.
  *
- *   const scene = new TrafficScene(container, { tagLayer, compass });
+ *   const scene = new TrafficScene(container, { tagLayer, compass, statusLayer });
+ *   scene.setDataState('live' | 'waiting' | 'stale' | 'offline', snapshot);
  *   scene.loadIntersection(snapshot);   // on selection
  *   scene.applyState(snapshot);         // on every backend update
  *
- * The scene never decides signal state; it renders what the backend sends.
+ * It draws the same snapshot the dashboard shows (app.js), so its numbers
+ * match the dashboard. The scene never decides signal state or invents
+ * traffic: lights show the backend's signals, vehicles follow the AI's
+ * detected counts, and without live data it says so (statusLayer).
  */
 
 const HOME = {
@@ -26,14 +30,16 @@ const SIM_STEP = 0.05;     // s, simulation sub-step
 const MAX_FRAME_DT = 0.25; // s, longest frame gap simulated in one go
 
 export class TrafficScene {
-  constructor(container, { tagLayer = null, compass = null } = {}) {
+  constructor(container, { tagLayer = null, compass = null, statusLayer = null } = {}) {
     this.container = container;
     this.tagLayer = tagLayer;
     this.compass = compass;
+    this.statusLayer = statusLayer;
     this.time = 0;
     this.tween = null;
     this.snapshot = null;
     this.frozen = false;
+    this.dataState = 'waiting';
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
@@ -122,22 +128,81 @@ export class TrafficScene {
     this.vehicles.reset();
     this.peds.reset();
     this.applyState(snapshot);
-    this.vehicles.prefill();
+    if (this._drawsTraffic()) this.vehicles.prefill();
   }
 
-  applyState(snapshot) {
-    this.snapshot = snapshot;
-    this.lights.setState(snapshot.signals, snapshot.pedestrianSignals);
-    this.vehicles.setSignals(snapshot.signals);
-    this.vehicles.setDemand(snapshot.traffic);
-    this.vehicles.setEmergency(snapshot.emergency);
-    this.peds.setState(snapshot.pedestrianSignals, snapshot.pedestrianRequests);
-    this._updateTagContent();
+  /**
+   * How the next snapshots are drawn:
+   *   'live'     fresh AI data: vehicles per approach follow the detected
+   *              counts and classes; tags show the counts.
+   *   'waiting'  nothing received yet: no vehicles, tags show "--", and the
+   *              status layer says "Waiting for live data".
+   *   'stale'    AI data stopped: the last picture stays, frozen, with the
+   *              tags marked stale; nothing new is added.
+   *   'offline'  backend unreachable: as stale, shown as reconnecting.
+   *   'simulation'  the Simulation tab's own snapshots: drawn like live data
+   *              (the dashboard labels it SIMULATED); motion stops while the
+   *              simulation is stopped or paused (setFrozen).
+   * The traffic lights always show the signals the backend last sent.
+   * app.js reloads the scene (loadIntersection) whenever the data mode
+   * changes, so vehicles from one mode never carry over into the other.
+   */
+  setDataState(dataState, snapshot = this.snapshot) {
+    const changed = dataState !== this.dataState;
+    const wasLive = this.dataState === 'live';
+    this.dataState = dataState;
+    if (dataState !== 'simulation') this.frozen = dataState === 'stale' || dataState === 'offline';
+    if (changed && dataState === 'waiting') {
+      this.vehicles.reset();
+      this.peds.reset();
+    }
+    this._updateStatusLayer(snapshot);
+    if (changed && this.snapshot) this.applyState(this.snapshot);
+    // Live data arrived after the scene was loaded: show the detected vehicles now.
+    if (changed && dataState === 'live' && !wasLive && this.snapshot) this.vehicles.prefill();
   }
 
   /** Stops (true) or resumes (false) vehicle and pedestrian motion without touching state. */
   setFrozen(frozen) {
     this.frozen = Boolean(frozen);
+  }
+
+  /** Live data, or the Simulation tab's data: the two states that add vehicles. */
+  _drawsTraffic() {
+    return this.dataState === 'live' || this.dataState === 'simulation';
+  }
+
+  applyState(snapshot) {
+    this.snapshot = snapshot;
+    const live = this._drawsTraffic();
+    const simulation = this.dataState === 'simulation';
+    this.lights.setState(snapshot.signals, snapshot.pedestrianSignals);
+    this.vehicles.setSignals(snapshot.signals);
+    // Only live (or simulation) data adds or removes vehicles; stale data
+    // leaves the frozen picture alone.
+    if (live) this.vehicles.setDemand(snapshot.traffic, { varied: simulation });
+    else if (this.dataState === 'waiting') this.vehicles.setDemand(null);
+    this.vehicles.setEmergency(live ? snapshot.emergency : null);
+    this.peds.setMode(simulation ? 'simulation' : 'live');
+    this.peds.setState(snapshot.pedestrianSignals, live ? snapshot.pedestrianRequests : {});
+    this._updateTagContent();
+    this._updateStatusLayer(snapshot);
+  }
+
+  /** Counters that must stay flat over time (console: trafficScene.stats()). */
+  stats() {
+    let objects = 0;
+    this.scene.traverse(() => { objects += 1; });
+    const { geometries, textures } = this.renderer.info.memory;
+    return {
+      dataState: this.dataState,
+      vehicles: this.vehicles.count(),
+      vehiclesPerApproach: Object.fromEntries(DIRS.map((d) => [d, this.vehicles.countOnApproach(d)])),
+      pooledVehicles: this.vehicles.pooledCount(),
+      sceneObjects: objects,
+      geometries,
+      textures,
+    };
   }
 
   resetView() {
@@ -169,6 +234,18 @@ export class TrafficScene {
     }
   }
 
+  /** Tag text for one approach; the same numbers as the dashboard's approach cards. */
+  _tagText(t) {
+    if (this.dataState === 'waiting' || !t) return '-- veh';
+    if (t.available === false || !Number.isFinite(t.vehicles)) {
+      return this.dataState === 'simulation' ? '-- veh' : 'video unavailable';
+    }
+    const shown = t.vehicles > MAX_PER_APPROACH ? ` (${MAX_PER_APPROACH} shown)` : '';
+    const queued = Number.isFinite(t.queueLength) ? ` · ${t.queueLength} queued` : '';
+    const stale = this._drawsTraffic() ? '' : ' · stale';
+    return `${t.vehicles} veh${queued}${shown}${stale}`;
+  }
+
   _updateTagContent() {
     const s = this.snapshot;
     if (!s) return;
@@ -176,11 +253,32 @@ export class TrafficScene {
       const tag = this.tags[dir];
       if (!tag) continue;
       const state = s.signals[dir];
-      const priority = s.emergency && s.emergency.active && s.emergency.direction === dir;
-      tag.el.className = `tag s-${state}${priority ? ' priority' : ''}`;
-      tag.count.textContent = `${s.traffic[dir].vehicles} veh`;
+      const priority = this._drawsTraffic() && s.emergency && s.emergency.active && s.emergency.direction === dir;
+      tag.el.className = `tag s-${state}${priority ? ' priority' : ''}${this._drawsTraffic() ? '' : ' no-live'}`;
+      tag.count.textContent = this._tagText(s.traffic && s.traffic[dir]);
       tag.prio.hidden = !priority;
     }
+  }
+
+  _updateStatusLayer(snapshot) {
+    const layer = this.statusLayer;
+    if (!layer) return;
+    const title = layer.querySelector('.vp-data-state-title');
+    const text = layer.querySelector('.vp-data-state-text');
+    const last = snapshot && snapshot.lastUpdate
+      ? new Date(snapshot.lastUpdate).toLocaleTimeString([], { hour12: false })
+      : null;
+    const messages = {
+      waiting: ['Waiting for live data', 'No detections from the AI cameras yet. Signals show the controller\'s fixed-time plan.'],
+      stale: ['Live data stale', `Last AI data at ${last || '--:--:--'}. Vehicles are frozen at that moment; signals run the fixed-time plan.`],
+      offline: ['Reconnecting', 'The connection to the backend was lost. Reconnecting automatically...'],
+    };
+    const message = messages[this.dataState];
+    layer.hidden = !message;
+    layer.dataset.state = this.dataState;
+    if (!message) return;
+    if (title.textContent !== message[0]) title.textContent = message[0];
+    if (text.textContent !== message[1]) text.textContent = message[1];
   }
 
   _updateTagPositions() {
@@ -218,8 +316,9 @@ export class TrafficScene {
     // Clamp long pauses (hidden tab), then advance the simulation in fixed
     // sub-steps so traffic stays in real time even at low frame rates.
     const dt = Math.min(this.clock.getDelta(), MAX_FRAME_DT);
-    // While frozen (paused / stopped simulation) traffic stands still; the
-    // scene keeps rendering so the camera stays usable.
+    // While frozen (AI data stale, backend offline, or a stopped/paused
+    // simulation) traffic stands still; the scene keeps rendering so the
+    // camera stays usable.
     for (let left = this.frozen ? 0 : dt; left > 1e-6; left -= SIM_STEP) {
       const step = Math.min(SIM_STEP, left);
       this.time += step;

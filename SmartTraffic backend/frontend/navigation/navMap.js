@@ -1,6 +1,8 @@
 /* global L */
 import { NAV_CONFIG } from './config.js';
 import { VERIFICATION_TEXT } from './hazardService.js';
+import { RANK_COLORS, rankColor, rankLabel } from './routeRanking.js';
+import { distanceToPolylineMeters } from './geo.js';
 import {
   directionLabel, escapeHtml, formatAge, formatCoords, formatDistance, formatDuration,
 } from './format.js';
@@ -30,6 +32,7 @@ export const ICON_HTML = {
   intersection: (cls = 'nv-ix-live', badge = '') => `<span class="nv-ix ${cls}"><span class="nv-ix-lamps"><i></i><i></i><i></i></span>${badge}</span>`,
   routeSelected: '<span class="nv-line nv-line-selected"></span>',
   routeAlternative: '<span class="nv-line nv-line-alt"></span>',
+  routeRank: (position) => `<span class="nv-line" style="border-top-color:${RANK_COLORS[position]}"></span>`,
 };
 
 const STATUS_TEXT = {
@@ -115,6 +118,7 @@ export class NavMap {
       road_closure: L.layerGroup().addTo(this.map),
     };
     this.intersectionMarkers = new Map(); // id -> { marker, key, popupKey }
+    this.routeLayers = new Map(); // route id -> { casing, line, label, key }
     this.startMarker = null;
     this.destMarker = null;
     this.userMarker = null;
@@ -214,23 +218,82 @@ export class NavMap {
 
   // ----------------------------------------------------------------- routes
 
-  setRoutes(routes, selectedId) {
-    this.groups.routes.clearLayers();
-    const ordered = [...routes].sort((a, b) => (a.id === selectedId) - (b.id === selectedId));
-    for (const route of ordered) {
-      const selected = route.id === selectedId;
-      const label = `Route ${route.index + 1} - ${formatDuration(route.duration)}, ${formatDistance(route.distance)}`;
-      if (selected) {
-        L.polyline(route.coordinates, { color: '#0a0c0e', weight: 11, opacity: 0.9, interactive: false }).addTo(this.groups.routes);
-        L.polyline(route.coordinates, { color: '#5a9cf8', weight: 6, opacity: 1, interactive: false, className: 'nv-route-line-selected' }).addTo(this.groups.routes);
-      } else {
-        const line = L.polyline(route.coordinates, {
-          color: '#8b949e', weight: 7, opacity: 0.85, bubblingMouseEvents: false, className: 'nv-route-line-alt',
-        }).addTo(this.groups.routes);
-        line.bindTooltip(`${label} (tap to select)`, { sticky: true });
-        line.on('click', () => this.onRouteSelected(route.id));
+  /**
+   * Draws the routes ranked best to worst: colours from green (best) to red
+   * (worst), the best route on top, the selected route highlighted with a
+   * casing and brought to the front. Lines are kept per route id and only
+   * restyled when the ranking changes, so live re-ranking never flickers.
+   *   order: route ids best first; estimates: id -> { duration } (optional)
+   */
+  setRoutes(routes, selectedId, { order = null, estimates = null } = {}) {
+    const ids = order || routes.map((r) => r.id);
+    const byId = new Map(routes.map((r) => [r.id, r]));
+    for (const [id, layers] of this.routeLayers) {
+      if (!byId.has(id)) {
+        layers.group.remove();
+        this.routeLayers.delete(id);
       }
     }
+    // A new route can change where the others are easiest to label.
+    const setKey = [...byId.keys()].sort().join(',');
+    const relabel = setKey !== this.routeSetKey;
+    this.routeSetKey = setKey;
+    // Worst first, so the best ends up on top; the selected one last of all.
+    const drawOrder = [...ids].reverse().sort((a, b) => (a === selectedId) - (b === selectedId));
+    for (const id of drawOrder) {
+      const route = byId.get(id);
+      if (!route) continue;
+      const position = ids.indexOf(id);
+      const color = rankColor(position, ids.length);
+      const selected = id === selectedId;
+      const duration = estimates && estimates.get(id) ? estimates.get(id).duration : route.duration;
+      const text = `Route ${position + 1} — ${rankLabel(position, ids.length)}: ${formatDuration(duration)}, ${formatDistance(route.distance)}`;
+      let layers = this.routeLayers.get(id);
+      if (!layers) {
+        const group = L.layerGroup().addTo(this.groups.routes);
+        const casing = L.polyline(route.coordinates, { color: '#0a0c0e', weight: 11, opacity: 0, interactive: false }).addTo(group);
+        const line = L.polyline(route.coordinates, { weight: 6, opacity: 0.9, bubblingMouseEvents: false, className: 'nv-route-line' }).addTo(group);
+        line.on('click', () => this.onRouteSelected(id));
+        line.bindTooltip('', { sticky: true });
+        const label = L.marker(this._labelPoint(route, routes), {
+          icon: divIcon('', [0, 0]), keyboard: false, interactive: true, zIndexOffset: 400,
+        }).addTo(group);
+        label.on('click', () => this.onRouteSelected(id));
+        layers = { group, casing, line, label, key: null };
+        this.routeLayers.set(id, layers);
+      }
+      if (relabel) layers.label.setLatLng(this._labelPoint(route, routes));
+      const key = `${color}|${selected}|${text}`;
+      if (layers.key !== key) {
+        layers.key = key;
+        layers.casing.setStyle({ opacity: selected ? 0.9 : 0 });
+        layers.line.setStyle({ color, weight: selected ? 7 : 5, opacity: selected || position === 0 ? 1 : 0.8 });
+        layers.line.setTooltipContent(`${text}${selected ? '' : ' (tap to select)'}`);
+        layers.label.setIcon(divIcon(
+          `<span class="nv-route-tag${selected ? ' nv-route-tag-on' : ''}" style="--rank:${color}"><b>${position + 1}</b>${formatDuration(duration)}</span>`,
+          [0, 0], [0, 0],
+        ));
+        layers.label.setZIndexOffset(selected ? 600 : 400 - position);
+      }
+      // Re-stack every time: the order can change without the style changing.
+      layers.casing.bringToFront();
+      layers.line.bringToFront();
+    }
+  }
+
+  /** Where a route's label goes: its point farthest from the other routes. */
+  _labelPoint(route, routes) {
+    const others = routes.filter((r) => r.id !== route.id);
+    const coords = route.coordinates;
+    let best = coords[Math.floor(coords.length / 2)];
+    let bestDistance = -1;
+    const step = Math.max(1, Math.floor(coords.length / 60));
+    for (let i = Math.floor(coords.length * 0.15); i < coords.length * 0.85; i += step) {
+      const p = { lat: coords[i][0], lng: coords[i][1] };
+      const d = others.length ? Math.min(...others.map((o) => distanceToPolylineMeters(p, o.coordinates))) : 0;
+      if (d > bestDistance) { bestDistance = d; best = coords[i]; }
+    }
+    return best;
   }
 
   fitRoutes(routes) {
@@ -302,7 +365,7 @@ export class NavMap {
       mapContainers: document.querySelectorAll('.leaflet-container').length,
       intersectionMarkers: this.intersectionMarkers.size,
       hazardMarkers: HAZARD_LAYERS.reduce((n, k) => n + this.groups[k].getLayers().length, 0),
-      routeLines: this.groups.routes.getLayers().length,
+      routeLines: this.routeLayers.size,
     };
   }
 }

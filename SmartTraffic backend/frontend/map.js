@@ -39,6 +39,21 @@ export class NetworkMap {
     });
     L.tileLayer(TILE_URL, { maxZoom: 19, attribution: ATTRIBUTION }).addTo(this.map);
 
+    this.setIntersections(intersections);
+
+    // Leaflet needs a nudge when its container is resized by CSS grid.
+    new ResizeObserver(() => this.map.invalidateSize()).observe(element);
+  }
+
+  /**
+   * Replaces the markers with one data mode's intersections (live and
+   * simulation each have their own list) and fits the view to them.
+   */
+  setIntersections(intersections) {
+    for (const marker of this.markers.values()) marker.remove();
+    this.markers.clear();
+    this.info.clear();
+    this.keys.clear();
     for (const ix of intersections) {
       this.info.set(ix.id, { ...ix });
       const marker = L.marker([ix.lat, ix.lng], {
@@ -55,9 +70,6 @@ export class NetworkMap {
 
     const bounds = L.latLngBounds(intersections.map((i) => [i.lat, i.lng]));
     this.map.fitBounds(bounds, { padding: [36, 36], maxZoom: 16 });
-
-    // Leaflet needs a nudge when its container is resized by CSS grid.
-    new ResizeObserver(() => this.map.invalidateSize()).observe(element);
   }
 
   _icon(id) {

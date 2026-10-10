@@ -1,10 +1,13 @@
 /**
  * Dashboard rendering. Pure DOM updates from backend snapshots; no state
- * of its own beyond element references.
+ * of its own beyond element references. Every number comes from the
+ * snapshot; while there is none (or the approach has no camera data) the
+ * dashboard says so instead of showing a number.
  */
 
 const DIRS = ['north', 'south', 'east', 'west'];
-const TYPE_LABEL = { ambulance: 'AMBULANCE', police: 'POLICE', fire_truck: 'FIRE TRUCK' };
+const TYPE_LABEL = { ambulance: 'AMBULANCE', police: 'POLICE', fire_truck: 'FIRE TRUCK', emergency: 'EMERGENCY VEHICLE' };
+const isNum = (n) => typeof n === 'number' && Number.isFinite(n);
 const MAX_EVENTS = 200;
 
 const $ = (id) => document.getElementById(id);
@@ -50,7 +53,8 @@ export function initLayout() {
         <span class="ap-state"></span>
         <span class="ap-tags"></span>
       </div>
-      <div class="ap-main"><span class="ap-veh">0</span><span class="ap-unit">vehicles</span></div>
+      <div class="ap-main"><span class="ap-veh">--</span><span class="ap-unit">vehicles</span></div>
+      <div class="ap-note"></div>
       <div class="ap-rows">
         <div><span>Waiting</span><b class="w">-</b></div>
         <div><span>Queue</span><b class="q">-</b></div>
@@ -64,6 +68,7 @@ export function initLayout() {
       state: ap.querySelector('.ap-state'),
       tags: ap.querySelector('.ap-tags'),
       veh: ap.querySelector('.ap-veh'),
+      note: ap.querySelector('.ap-note'),
       waiting: ap.querySelector('.w'),
       queue: ap.querySelector('.q'),
       score: ap.querySelector('.sc'),
@@ -148,6 +153,48 @@ function scopeLabel(name) {
   return dataMode === 'simulation' ? `${name} · simulation` : name;
 }
 
+/** Seconds since the snapshot's last AI update, from the server's clock. */
+function dataAgeSeconds(snap) {
+  if (!snap || !snap.lastUpdate || !snap.serverTime) return null;
+  const atServer = (Date.parse(snap.serverTime) - Date.parse(snap.lastUpdate)) / 1000;
+  return Math.max(0, atServer + (performance.now() - (snap._receivedAt || performance.now())) / 1000);
+}
+
+function ageText(seconds) {
+  if (seconds === null) return '';
+  if (seconds < 90) return `${Math.round(seconds)} s ago`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)} min ago`;
+  return `${Math.round(seconds / 3600)} h ago`;
+}
+
+/**
+ * Badge on the 3D view (live traffic mode only; Simulation mode shows the
+ * SIMULATED DATA badge instead): is everything on screen live AI data now?
+ *   live / waiting (nothing received yet) / stale (AI data stopped; the last
+ *   values stay, marked with their time) / offline (backend unreachable).
+ */
+export function setDataState(dataState, snap) {
+  const badge = $('data-badge');
+  badge.hidden = dataState === 'simulation';
+  badge.className = `data-badge ${dataState}`;
+  badge.dataset.state = dataState;
+  tickDataAge(dataState, snap);
+}
+
+export function tickDataAge(dataState, snap) {
+  const badge = $('data-badge');
+  if (badge.dataset.state !== dataState || dataState === 'simulation') return;
+  let text;
+  if (dataState === 'live') text = 'LIVE AI DATA';
+  else if (dataState === 'waiting') text = 'WAITING FOR LIVE DATA';
+  else if (dataState === 'offline') text = 'BACKEND OFFLINE - RECONNECTING';
+  else {
+    const last = snap && snap.lastUpdate ? formatTime(snap.lastUpdate) : '--:--:--';
+    text = `STALE - LAST AI DATA ${last} (${ageText(dataAgeSeconds(snap))})`;
+  }
+  setText(badge, text);
+}
+
 export function setSelected(id, name, snap) {
   document.querySelectorAll('.ix-item').forEach((li) => li.classList.toggle('selected', li.dataset.id === id));
   setText($('tb-name'), name || id);
@@ -159,9 +206,9 @@ export function setSelected(id, name, snap) {
 
 // ---------------------------------------------------------------- render
 
-export function render(snap) {
+export function render(snap, dataState = 'live') {
   renderDecision(snap);
-  renderApproaches(snap);
+  renderApproaches(snap, dataState);
   renderSignals(snap);
   renderEmergency(snap);
   renderAlerts(snap);
@@ -225,7 +272,10 @@ function renderDecision(s) {
   setText($('dec-phase'), s.phase.replace('_', ' '));
 }
 
-/** `frozen`: a stopped/paused simulation - show the remaining time as received, without counting down. */
+/**
+ * `frozen`: a stopped/paused simulation, or the backend is unreachable -
+ * show the remaining time as received, without counting down.
+ */
 export function tickCountdown(s, frozen = false) {
   if (!s) return;
   const remEl = $('dec-remaining');
@@ -248,29 +298,69 @@ export function tickCountdown(s, frozen = false) {
   bar.className = `progress ${s.phase === 'GREEN' ? 'c-green' : s.phase === 'YELLOW' ? 'c-yellow' : ''}`;
 }
 
-function renderApproaches(s) {
-  const maxScore = Math.max(1, ...DIRS.map((d) => s.scores[d]));
-  const top = DIRS.reduce((a, b) => (s.scores[b] > s.scores[a] ? b : a), DIRS[0]);
+/**
+ * Text for one approach: its counts, or why there are none.
+ *   waiting       nothing received from the AI service yet
+ *   unavailable   the AI service has no video for this approach
+ *   stale         last received values (the badge shows their time)
+ *   simulation    simulated values (Simulation mode, labelled as such)
+ */
+export function approachView(t, dataState) {
+  if (dataState === 'waiting' || !t) return { vehicles: null, note: 'Waiting for live data', state: 'nodata' };
+  if (dataState === 'simulation') {
+    if (t.available === false || !isNum(t.vehicles)) return { vehicles: null, note: 'Simulation not started', state: 'nodata' };
+    return { vehicles: t.vehicles, queueLength: t.queueLength, waiting: isNum(t.waiting) ? t.waiting : t.waitingTime, note: '', state: 'simulation' };
+  }
+  if (t.available === false || !isNum(t.vehicles)) {
+    return { vehicles: null, note: 'Video unavailable', state: 'unavailable' };
+  }
+  const stale = dataState === 'stale' || dataState === 'offline';
+  return {
+    vehicles: t.vehicles,
+    queueLength: t.queueLength,
+    waiting: isNum(t.waiting) ? t.waiting : t.waitingTime,
+    note: stale ? 'Stale - last AI data' : '',
+    state: stale ? 'stale' : 'live',
+  };
+}
+
+function renderApproaches(s, dataState) {
+  const views = Object.fromEntries(DIRS.map((d) => [d, approachView(s.traffic[d], dataState)]));
+  const score = (d) => (views[d].vehicles === null ? 0 : s.scores[d]);
+  const maxScore = Math.max(1, ...DIRS.map(score));
+  const top = DIRS.reduce((a, b) => (score(b) > score(a) ? b : a), DIRS[0]);
   const em = s.emergency && s.emergency.active ? s.emergency : null;
 
   for (const dir of DIRS) {
     const r = refs.approaches[dir];
     const sig = s.signals[dir];
-    const t = s.traffic[dir];
+    const view = views[dir];
     const priority = em && em.direction === dir;
 
     r.root.classList.toggle('active', sig === 'GREEN');
     r.root.classList.toggle('yellow', sig === 'YELLOW');
     r.root.classList.toggle('priority', !!priority);
-    r.root.classList.toggle('top-score', dir === top && s.scores[dir] > 0);
+    r.root.classList.toggle('top-score', dir === top && score(dir) > 0);
+    r.root.classList.toggle('no-data', view.vehicles === null);
+    r.root.classList.toggle('stale', view.state === 'stale');
     r.lamp.className = `lamp lamp-${sig}`;
     setText(r.state, sig === 'RED' && s.redSeconds[dir] ? `RED ${s.redSeconds[dir]}s` : sig);
 
-    setText(r.veh, String(t.vehicles));
-    setText(r.waiting, `${Math.round(t.waiting)}s`);
-    setText(r.queue, String(t.queueLength));
-    setText(r.score, String(s.scores[dir]));
-    r.bar.style.width = `${(s.scores[dir] / maxScore) * 100}%`;
+    if (view.vehicles === null) {
+      setText(r.veh, '--');
+      setText(r.waiting, '-');
+      setText(r.queue, '-');
+      setText(r.score, '-');
+      r.bar.style.width = '0%';
+    } else {
+      setText(r.veh, String(view.vehicles));
+      setText(r.waiting, `${Math.round(view.waiting)}s`);
+      setText(r.queue, String(view.queueLength));
+      setText(r.score, String(s.scores[dir]));
+      r.bar.style.width = `${(s.scores[dir] / maxScore) * 100}%`;
+    }
+    setText(r.note, view.note);
+    r.note.className = `ap-note ${view.state}`;
 
     const chips = [];
     if (priority) chips.push('<span class="chip chip-prio">PRIORITY</span>');
@@ -313,6 +403,9 @@ function renderEmergency(s) {
       <div class="em-row"><span>Approach <b>${up(em.direction)}</b></span><span>Confidence <b>${pct(em.confidence)}</b></span></div>
       <div class="em-since">Active since ${formatTime(em.since)}</div>
     </div>`;
+  } else if (!s.detectors || !s.detectors.emergency) {
+    // The AI service runs no emergency detector (no Roboflow key): "none" would be a guess.
+    html = '<div class="emergency-none">EMERGENCY DETECTION OFF</div>';
   } else {
     html = '<div class="emergency-none">NO ACTIVE EMERGENCY</div>';
     if (em.candidate) {

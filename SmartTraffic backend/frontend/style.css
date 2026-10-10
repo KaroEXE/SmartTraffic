@@ -904,3 +904,88 @@ body[data-mode="simulation"] .topbar { box-shadow: inset 0 -2px 0 var(--amber); 
 @media (max-width: 1279px) {
   .mode-switch { order: 2; }
 }
+
+/* ==========================================================================
+   Live AI: four camera tiles + 3D scene data badge (additive)
+   ========================================================================== */
+
+/* One tile per approach, 2 x 2, in the AI service's camera order. */
+.lai-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.lai-grid .lai-frame { flex: none; min-height: 0; }
+.lai-tile-name {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 2;
+  padding: 1px 6px;
+  background: rgba(10, 12, 14, 0.8);
+  border: 1px solid var(--line-2);
+  border-radius: 2px;
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+.lai-tile.reconnecting .lai-ph-text { color: var(--amber); }
+.lai-tile.unavailable .lai-ph-text { color: var(--red); }
+
+@media (max-width: 1279px) {
+  .lai-grid { flex: none; grid-template-rows: none; }
+  .lai-grid .lai-frame { aspect-ratio: 4 / 3; min-height: 0; }
+}
+@media (max-width: 640px) {
+  .lai-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Whether the 3D scene and the numbers are live AI data. */
+.data-badge {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 2px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: 2px;
+  background: rgba(10, 12, 14, 0.85);
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.data-badge.live { border-color: var(--green); color: var(--green); }
+.data-badge.waiting { border-color: var(--text-3); color: var(--text-2); }
+.data-badge.stale { border-color: var(--amber); color: var(--amber); }
+.data-badge.offline { border-color: var(--red); color: var(--red); }
+
+/* 3D view without live AI data: says why instead of showing numbers. */
+.vp-data-state {
+  position: absolute;
+  left: 50%;
+  bottom: 56px;
+  transform: translateX(-50%);
+  max-width: min(440px, calc(100% - 32px));
+  padding: 10px 14px;
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--text-3);
+  border-radius: 2px;
+  background: rgba(10, 12, 14, 0.88);
+  pointer-events: none;
+}
+.vp-data-state[hidden] { display: none; }
+.vp-data-state[data-state="stale"] { border-left-color: var(--amber); }
+.vp-data-state[data-state="offline"] { border-left-color: var(--red); }
+.vp-data-state-title { font-size: 12px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text); }
+.vp-data-state-text { margin-top: 4px; font-size: 12px; color: var(--text-2); }
+.tag.no-live .tag-count { color: var(--text-3); }
+
+/* Approach cards without numbers, or with numbers that are no longer live. */
+.ap-note { min-height: 14px; font-size: 10.5px; letter-spacing: 0.06em; color: var(--text-3); }
+.ap-note.unavailable { color: var(--red); }
+.ap-note.stale { color: var(--amber); }
+.ap.no-data .ap-veh { color: var(--text-4); }
+.ap.stale .ap-veh, .ap.stale .ap-rows b { color: var(--text-3); }

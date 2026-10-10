@@ -5,7 +5,8 @@ import { RoutePanel } from './routePanel.js';
 import { SearchBox } from './searchBox.js';
 import { createStatus } from './status.js';
 import { createGeocoder } from './geocoder.js';
-import { planRoutes, rankRoutes, RouteError } from './routeService.js';
+import { planRoutes, findMoreRoutes, RouteError } from './routeService.js';
+import { estimateRoute, orderRoutes, liveStatus } from './routeRanking.js';
 import { matchRouteToTraffic, findRerouteSuggestion } from './routeTraffic.js';
 import { createHazardProvider, createHazardLoader } from './hazardService.js';
 import { createTrafficStore } from './trafficStore.js';
@@ -27,8 +28,11 @@ const state = {
   destination: null, // { point, label }
   routes: [],
   selectedId: null,
-  fastestId: null,
-  rankBasis: 'base',
+  userSelected: false, // false: the selection follows the best route
+  order: [], // route ids, best first
+  estimates: new Map(), // route id -> estimateRoute()
+  liveState: 'not-on-route',
+  searching: false, // extra alternatives still being requested
   trafficRouting: 'not-configured',
   snapWarnings: [],
   routeKey: null,
@@ -128,9 +132,43 @@ function clearRoutes() {
   if (state.routeController) state.routeController.abort();
   state.routes = [];
   state.selectedId = null;
+  state.userSelected = false;
+  state.order = [];
+  state.estimates = new Map();
+  state.searching = false;
   state.routeKey = null;
   state.matches = new Map();
   map.setRoutes([], null);
+}
+
+/**
+ * Ranks the current routes from the routing times plus the live AI data
+ * already in the traffic store. Never requests routes. `fresh` drops the
+ * previous order (new route set); otherwise near-ties keep their places.
+ * Returns true when anything shown (order or times) changed.
+ */
+function rerank({ fresh = false } = {}) {
+  const views = store.list();
+  const estimates = new Map(state.routes.map((r) => [r.id, estimateRoute(r, views, cfg.traffic)]));
+  const order = orderRoutes(state.routes, estimates, fresh ? null : state.order, {
+    hysteresisSeconds: cfg.traffic.rankHysteresisSeconds,
+  });
+  const signature = (o, e) => o.map((id) => `${id}:${Math.round(e.get(id).duration)}`).join('|');
+  const changed = fresh || signature(order, estimates) !== signature(state.order, state.estimates)
+    || liveStatus(estimates) !== state.liveState;
+  state.estimates = estimates;
+  state.order = order;
+  state.liveState = liveStatus(estimates);
+  if (!state.userSelected && order.length) state.selectedId = order[0];
+  return changed;
+}
+
+function ranking() {
+  return { order: state.order, estimates: state.estimates, liveState: state.liveState, searching: state.searching };
+}
+
+function drawRoutes() {
+  map.setRoutes(state.routes, state.selectedId, { order: state.order, estimates: state.estimates });
 }
 
 async function requestRoutes({ force = false } = {}) {
@@ -151,21 +189,20 @@ async function requestRoutes({ force = false } = {}) {
   try {
     const result = await planRoutes(state.start.point, state.destination.point, { signal: controller.signal });
     if (controller.signal.aborted) return;
-    const { fastestId, basis } = rankRoutes(result.routes);
     state.routes = result.routes;
-    state.fastestId = fastestId;
-    state.rankBasis = basis;
     state.trafficRouting = result.trafficRouting;
     state.snapWarnings = result.snapWarnings;
     const kept = keepIndex !== undefined ? result.routes.find((r) => r.index === keepIndex) : null;
-    state.selectedId = kept ? kept.id : fastestId;
+    state.userSelected = Boolean(kept && state.userSelected);
+    state.searching = !force && state.routes.length < cfg.routing.maxRoutes;
+    rerank({ fresh: true });
+    if (kept) state.selectedId = kept.id;
 
-    map.setRoutes(state.routes, state.selectedId);
+    drawRoutes();
     panel.showRoutes({
       routes: state.routes,
       selectedId: state.selectedId,
-      fastestId,
-      rankBasis: basis,
+      ...ranking(),
       trafficRouting: state.trafficRouting,
       snapWarnings: state.snapWarnings,
     });
@@ -176,6 +213,7 @@ async function requestRoutes({ force = false } = {}) {
       updateInsets(); // the sheet just changed height; fit the route into the visible map
       map.fitRoutes(state.routes);
     }
+    if (state.searching) await addAlternatives(controller);
   } catch (err) {
     if (controller.signal.aborted || (err instanceof RouteError && err.code === 'aborted')) return;
     state.routeKey = null;
@@ -184,10 +222,40 @@ async function requestRoutes({ force = false } = {}) {
   }
 }
 
+/**
+ * Fewer routes than wanted: ask the routing service for real alternatives
+ * through via points (spaced to respect its rate limit) and add each one as
+ * it arrives. Stops when enough are found or the route request changes.
+ */
+async function addAlternatives(controller) {
+  try {
+    await findMoreRoutes(state.start.point, state.destination.point, state.routes, {
+      signal: controller.signal,
+      onRoute: (route) => {
+        if (controller.signal.aborted) return;
+        state.routes = [...state.routes, route];
+        rerank({ fresh: true });
+        drawRoutes();
+        panel.addRoute(route, ranking());
+        panel.select(state.selectedId);
+      },
+    });
+  } catch (err) {
+    if (controller.signal.aborted || (err instanceof RouteError && err.code === 'aborted')) return;
+  }
+  if (controller.signal.aborted) return;
+  state.searching = false;
+  panel.rank(ranking());
+  computeMatches();
+  panel.updateTraffic(state.matches);
+  map.fitRoutes(state.routes);
+}
+
 function selectRoute(id) {
   if (!state.routes.some((r) => r.id === id) || id === state.selectedId) return;
   state.selectedId = id;
-  map.setRoutes(state.routes, id);
+  state.userSelected = true;
+  drawRoutes();
   panel.select(id);
   panel.clearSuggestion();
   markCurrentAlertsSeen();
@@ -228,6 +296,14 @@ function renderTraffic() {
   if (!state.routes.length) return;
   computeMatches();
   panel.updateTraffic(state.matches);
+
+  // Live traffic changed: re-rank from the data already here (no route
+  // requests). Lines and list items are restyled and moved in place.
+  if (rerank()) {
+    drawRoutes();
+    panel.rank(ranking());
+    panel.select(state.selectedId);
+  }
 
   const suggestion = findRerouteSuggestion({
     routes: state.routes,
@@ -393,6 +469,11 @@ function boot() {
       storeListeners: store.listenerCount(),
       routes: state.routes.length,
       selectedRoute: state.selectedId,
+      ranking: state.order.map((id, i) => ({
+        rank: i + 1, id, minutes: +(state.estimates.get(id).duration / 60).toFixed(2),
+        liveDelaySeconds: Math.round(state.estimates.get(id).delay),
+      })),
+      liveState: state.liveState,
       hazardStatus: hazardState.status,
     }),
   });

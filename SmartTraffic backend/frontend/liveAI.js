@@ -1,25 +1,57 @@
 /**
- * Live AI view - "what is the AI camera seeing right now?"
+ * Live AI view - "what are the AI cameras seeing right now?"
  *
- * Frontend structure only. Nothing here generates, simulates or mocks data:
- * every panel starts in an empty "not connected" state and changes only
- * when one of the update functions below is called with real data.
+ * Nothing here generates, simulates or mocks data: every panel starts in an
+ * empty "not connected" state and changes only when real data arrives.
  *
- * Planned integration (not implemented yet):
+ *   Python + YOLO -> Flask -> four annotated MJPEG streams, loaded straight
+ *     from the AI service (AI_STREAM_URL, via GET /api/client-config) into
+ *     one tile per approach. Images need no CORS. GET <AI_STREAM_URL>/api/cameras
+ *     tells each tile whether its stream is live; that one call needs the Node
+ *     site's URL in the AI service's ALLOWED_ORIGINS.
  *
- *   Python + YOLO -> Flask -> live camera stream -> connectLiveVideo(url)
+ *   Python + YOLO -> Flask -> JSON -> Node/Express -> Socket.IO -> app.js ->
+ *     updateFromLiveSnapshot(snapshot, dataState): detection panels, from the
+ *     same snapshot the dashboard and the 3D scene draw. Only fresh AI data is
+ *     shown as numbers; otherwise the panels say why there are none.
  *
- *   Python + YOLO -> Flask -> JSON -> Node/Express -> Socket.IO -> updateFromDetection(payload)
- *
- * Do NOT wire this view to the existing `trafficUpdate` socket event while
- * mock/mockClient.js is the data source - that data is simulated.
+ * The streams are open only while this view is shown and the page is
+ * visible, so a dashboard on another tab holds no AI service connections.
  */
 
 const DIRS = ['north', 'south', 'east', 'west'];
-const TYPE_LABEL = { ambulance: 'AMBULANCE', police: 'POLICE', fire_truck: 'FIRE TRUCK' };
+// Tile order: the AI service's camera order (its original 2 x 2 grid).
+const STREAM_DIRS = ['north', 'south', 'west', 'east'];
+const TYPE_LABEL = { ambulance: 'AMBULANCE', police: 'POLICE', fire_truck: 'FIRE TRUCK', emergency: 'EMERGENCY VEHICLE' };
+const NO_DATA_NOTE = {
+  waiting: 'Waiting for live data',
+  stale: 'AI data stopped',
+  offline: 'Reconnecting to the backend',
+  simulation: 'Live data is not shown in Simulation mode - switch to Live traffic',
+};
+
+const TICK_MS = 1000;          // retry check
+const STATUS_EVERY_TICKS = 3;  // GET /api/cameras every 3 s
+const STATUS_TIMEOUT_MS = 5000;
+const RETRY_MIN_MS = 2000;
+const RETRY_MAX_MS = 15000;
+// Assigning this aborts an MJPEG request; removing the <img> alone may not.
+const BLANK_IMAGE = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
 
 const el = {};
-let streamElement = null;
+const tiles = {};
+const streams = {
+  base: null,           // AI service base URL, from /api/client-config
+  configLoaded: false,
+  active: false,        // view shown and page visible
+  timer: null,
+  ticks: 0,
+  statusWorks: false,   // /api/cameras answered at least once (CORS is set up)
+  statusOk: false,      // the latest /api/cameras call answered
+  statusFailures: 0,    // consecutive failed /api/cameras calls
+  lastStatus: null,     // { at, sequences } for the display frame rate
+  fps: null,
+};
 
 const $ = (id) => document.getElementById(id);
 const up = (s) => (s ? String(s).toUpperCase() : '--');
@@ -53,6 +85,7 @@ export function showView(view) {
     tab.classList.toggle('active', active);
     tab.setAttribute('aria-selected', String(active));
   });
+  syncStreams();
 }
 
 // ------------------------------------------------------------------- init
@@ -70,49 +103,53 @@ export function initializeLiveAI() {
   el.emergency = $('lai-emergency');
   el.pedestrians = $('lai-pedestrians');
   el.frameSource = $('lai-cam-source');
-  el.placeholder = $('lai-placeholder');
-  el.placeholderText = $('lai-ph-text');
-  el.stream = $('lai-stream');
   el.camStatus = $('lai-cam-status');
   el.camSource = $('lai-cam-src');
   el.camFps = $('lai-cam-fps');
   el.camRes = $('lai-cam-res');
 
+  document.querySelectorAll('.lai-tile').forEach((node) => {
+    tiles[node.dataset.dir] = {
+      dir: node.dataset.dir,
+      node,
+      placeholder: node.querySelector('.lai-placeholder'),
+      text: node.querySelector('.lai-ph-text'),
+      stream: node.querySelector('.lai-stream'),
+      img: null,
+      state: 'idle',       // idle | connecting | live | reconnecting | unavailable
+      retryAt: 0,
+      retryDelay: RETRY_MIN_MS,
+      sequence: null,
+    };
+  });
+
   document.querySelectorAll('.view-tab').forEach((tab) => {
     tab.addEventListener('click', () => showView(tab.dataset.view));
   });
+  document.addEventListener('visibilitychange', syncStreams);
+  // Free the AI service's viewer slots as soon as the page goes away.
+  window.addEventListener('pagehide', () => stopStreams());
+  window.addEventListener('pageshow', syncStreams);
 
   // Empty, not-connected state. No values are invented.
   updateLiveAIStatus({ state: 'offline' });
-  updateDetectionSummary({});
-  updateDirectionalTraffic({});
-  updateEmergencyDetection(null);
-  updatePedestrianDetection(null);
+  updateFromLiveSnapshot(null, 'waiting');
   updateCameraInfo({});
 
-  // Handle for integration testing from the browser console, e.g.
-  //   liveAI.connectLiveVideo('http://<flask-host>:5000/video_feed')
-  window.liveAI = {
-    showView,
-    connectLiveVideo,
-    disconnectLiveVideo,
-    updateLiveAIStatus,
-    updateDetectionSummary,
-    updateDirectionalTraffic,
-    updateEmergencyDetection,
-    updatePedestrianDetection,
-    updateCameraInfo,
-    updateFromDetection,
-  };
+  loadStreamConfig();
+
+  // Read-only checks from the browser console, e.g. liveAI.streamStates().
+  // Nothing here can put values on the panels: only snapshots from app.js do.
+  window.liveAI = { showView, streamStates };
 }
 
 // ----------------------------------------------------------------- status
 
 const STATUS_TEXT = {
-  offline: ['OFFLINE / NOT CONNECTED', 'Waiting for AI connection - placeholder until the Flask service is connected'],
+  offline: ['OFFLINE / NOT CONNECTED', 'AI service not configured - set AI_STREAM_URL on the backend'],
   connecting: ['CONNECTING', 'Contacting AI service...'],
-  connected: ['CONNECTED', 'Receiving AI detection data'],
-  error: ['CONNECTION ERROR', 'AI service unreachable'],
+  connected: ['CONNECTED', 'Receiving AI camera streams'],
+  error: ['CONNECTION ERROR', 'AI service unreachable - retrying'],
 };
 
 /**
@@ -128,35 +165,41 @@ export function updateLiveAIStatus({ state = 'offline', detail } = {}) {
 // -------------------------------------------------------------- detections
 
 /**
- * @param {{ vehicles?: number, pedestrians?: number, emergencyVehicles?: number, confidence?: number }} summary
- *   confidence is 0-1. Missing values stay in their placeholder state.
+ * @param {{ vehicles?: number, pedestrians?: number|string, emergencyVehicles?: number|string, confidence?: number }} summary
+ *   confidence is 0-1. A missing value shows "--"; a detector that does not
+ *   run is passed as a short text ("off").
  */
 export function updateDetectionSummary({ vehicles, pedestrians, emergencyVehicles, confidence } = {}) {
-  setValue(el.sumVehicles, isNum(vehicles) ? vehicles : null, '0');
-  setValue(el.sumPedestrians, isNum(pedestrians) ? pedestrians : null, '0');
-  setValue(el.sumEmergency, isNum(emergencyVehicles) ? emergencyVehicles : null, '0');
+  const shown = (v) => (isNum(v) || typeof v === 'string' ? v : null);
+  setValue(el.sumVehicles, isNum(vehicles) ? vehicles : null, '--');
+  setValue(el.sumPedestrians, shown(pedestrians), '--');
+  setValue(el.sumEmergency, shown(emergencyVehicles), '--');
   setValue(el.sumConfidence, isNum(confidence) ? pct(confidence) : null, '--');
 }
 
 /**
- * @param {{ north?: {vehicles:number}, south?: ..., east?: ..., west?: ... }} traffic
- *   Same per-direction shape as the POST /api/traffic contract.
+ * @param {{ north?: {vehicles:number, available?:boolean}|null, south?: ..., east?: ..., west?: ... }} traffic
+ *   Same per-direction shape as the snapshot. `noData` explains a missing value.
  */
-export function updateDirectionalTraffic(traffic = {}) {
+export function updateDirectionalTraffic(traffic = {}, noData = '') {
   for (const dir of DIRS) {
-    const node = el.directions.querySelector(`.ap[data-dir="${dir}"] [data-field="vehicles"]`);
-    const n = traffic[dir] && isNum(traffic[dir].vehicles) ? traffic[dir].vehicles : null;
-    setValue(node, n, '0');
+    const card = el.directions.querySelector(`.ap[data-dir="${dir}"]`);
+    const t = traffic[dir];
+    const n = t && t.available !== false && isNum(t.vehicles) ? t.vehicles : null;
+    setValue(card.querySelector('[data-field="vehicles"]'), n, '--');
+    const note = card.querySelector('[data-field="note"]');
+    if (note) note.textContent = n !== null ? '' : (noData || (t && t.available === false ? 'Video unavailable' : ''));
   }
 }
 
 /**
  * @param {{ detected: boolean, type?: string, direction?: string, confidence?: number } | null} emergency
+ * @param {string} [empty] text when nothing is detected (or why nothing can be)
  */
-export function updateEmergencyDetection(emergency) {
+export function updateEmergencyDetection(emergency, empty = 'NO EMERGENCY VEHICLE DETECTED') {
   el.emergency.replaceChildren();
   if (!emergency || !emergency.detected) {
-    el.emergency.appendChild(emptyNote('NO EMERGENCY VEHICLE DETECTED'));
+    el.emergency.appendChild(emptyNote(empty));
     return;
   }
   const box = document.createElement('div');
@@ -179,15 +222,16 @@ export function updateEmergencyDetection(emergency) {
 
 /**
  * @param {{ count?: number, directions?: {north?:boolean, south?:boolean, east?:boolean, west?:boolean} } | null} pedestrians
+ * @param {string} [empty] text when nobody is detected (or why nobody can be)
  */
-export function updatePedestrianDetection(pedestrians) {
+export function updatePedestrianDetection(pedestrians, empty = 'NO PEDESTRIANS DETECTED') {
   el.pedestrians.replaceChildren();
   const dirs = pedestrians && pedestrians.directions
     ? DIRS.filter((d) => pedestrians.directions[d])
     : [];
   const count = pedestrians && isNum(pedestrians.count) ? pedestrians.count : null;
   if (!dirs.length && !count) {
-    el.pedestrians.appendChild(emptyNote('NO PEDESTRIANS DETECTED'));
+    el.pedestrians.appendChild(emptyNote(empty));
     return;
   }
   const row = document.createElement('div');
@@ -200,23 +244,37 @@ export function updatePedestrianDetection(pedestrians) {
 }
 
 /**
- * Convenience mapper for a payload in the POST /api/traffic shape
- * (traffic / pedestrians / emergency), optionally with
- * `pedestrianCount` and `confidence` fields if the AI provides them.
+ * The selected intersection's snapshot (the same object the dashboard and the
+ * 3D scene draw) and its data state from app.js. Numbers are shown only for
+ * fresh AI data ("live"); otherwise every panel says why there are none.
+ * A detector the AI service does not run is shown as off, never as zero.
  */
-export function updateFromDetection(payload) {
-  if (!payload) return;
-  const traffic = payload.traffic || {};
-  const vehicles = DIRS.reduce((sum, d) => sum + (traffic[d] && isNum(traffic[d].vehicles) ? traffic[d].vehicles : 0), 0);
-  const emergency = payload.emergency || null;
+export function updateFromLiveSnapshot(snapshot, dataState = 'live') {
+  if (!snapshot || dataState !== 'live') {
+    const why = NO_DATA_NOTE[dataState] || NO_DATA_NOTE.waiting;
+    updateDetectionSummary({});
+    updateDirectionalTraffic({}, why);
+    updateEmergencyDetection(null, why.toUpperCase());
+    updatePedestrianDetection(null, why.toUpperCase());
+    return;
+  }
+  const traffic = snapshot.traffic || {};
+  const detectors = snapshot.detectors || {};
+  const measured = DIRS.filter((d) => traffic[d] && traffic[d].available !== false && isNum(traffic[d].vehicles));
+  const confidences = measured.map((d) => traffic[d].confidence).filter(isNum);
+  const emergency = snapshot.emergency || null;
+
   updateDirectionalTraffic(traffic);
-  updateEmergencyDetection(emergency);
-  updatePedestrianDetection({ count: payload.pedestrianCount, directions: payload.pedestrians });
+  updateEmergencyDetection(emergency, detectors.emergency ? undefined : 'EMERGENCY DETECTION OFF (NO ROBOFLOW KEY)');
+  updatePedestrianDetection(
+    { directions: snapshot.pedestrians },
+    detectors.pedestrians ? undefined : 'PEDESTRIAN DETECTION NOT RUNNING',
+  );
   updateDetectionSummary({
-    vehicles,
-    pedestrians: payload.pedestrianCount,
-    emergencyVehicles: emergency && emergency.detected ? 1 : 0,
-    confidence: payload.confidence,
+    vehicles: measured.length ? measured.reduce((sum, d) => sum + traffic[d].vehicles, 0) : null,
+    pedestrians: detectors.pedestrians ? DIRS.filter((d) => snapshot.pedestrians && snapshot.pedestrians[d]).length : 'off',
+    emergencyVehicles: detectors.emergency ? (emergency && emergency.detected ? 1 : 0) : 'off',
+    confidence: confidences.length ? confidences.reduce((a, b) => a + b, 0) / confidences.length : null,
   });
 }
 
@@ -234,63 +292,260 @@ export function updateCameraInfo({ status, source, fps, resolution } = {}) {
   el.frameSource.textContent = source || 'No source configured';
 }
 
-/**
- * Mounts a live stream in the camera frame. Not called anywhere yet - the
- * Flask endpoint will be supplied when the AI service exists.
- *
- * @param {string} url  Stream URL, e.g. a Flask MJPEG route.
- * @param {{ type?: 'mjpeg'|'video' }} options
- *   'mjpeg' (default) - multipart/x-mixed-replace stream, rendered with <img>
- *   'video'           - a source the <video> element can play directly
- */
-export function connectLiveVideo(url, { type = 'mjpeg' } = {}) {
-  if (!url) return;
-  disconnectLiveVideo();
+// ----------------------------------------------------------- camera streams
 
-  const media = document.createElement(type === 'video' ? 'video' : 'img');
-  media.alt = 'Live AI camera feed';
-  if (type === 'video') Object.assign(media, { autoplay: true, muted: true, playsInline: true });
-
-  const onReady = () => {
-    if (streamElement !== media) return;
-    el.placeholder.hidden = true;
-    const w = media.naturalWidth || media.videoWidth;
-    const h = media.naturalHeight || media.videoHeight;
-    updateCameraInfo({ status: 'Connected', source: url, resolution: w && h ? `${w} x ${h}` : undefined });
-  };
-  const onError = () => {
-    if (streamElement !== media) return;
-    disconnectLiveVideo();
-    el.placeholderText.textContent = 'Camera stream unavailable - waiting for camera connection...';
-    updateCameraInfo({ status: 'Error', source: url });
-  };
-  media.addEventListener(type === 'video' ? 'loadeddata' : 'load', onReady);
-  media.addEventListener('error', onError);
-  if (type !== 'video') {
-    // MJPEG <img> streams do not reliably fire 'load'; watch for the first frame.
-    const poll = setInterval(() => {
-      if (streamElement !== media) clearInterval(poll);
-      else if (media.naturalWidth > 0) {
-        clearInterval(poll);
-        onReady();
+/** The AI service URL set in the backend's AI_STREAM_URL (GET /api/client-config). */
+async function loadStreamConfig() {
+  for (let attempt = 0; !streams.configLoaded; attempt += 1) {
+    try {
+      const res = await fetch('/api/client-config', { cache: 'no-store' });
+      if (res.ok) {
+        const { aiStreamUrl } = await res.json();
+        streams.configLoaded = true;
+        if (aiStreamUrl) connectCameraStreams(aiStreamUrl);
+        else renderSummary();
+        return;
       }
-    }, 300);
+    } catch {
+      // Backend unreachable (cold start): try again shortly.
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(10000, 1000 * (attempt + 1))));
   }
-
-  streamElement = media;
-  updateCameraInfo({ status: 'Connecting', source: url });
-  media.src = url;
-  el.stream.appendChild(media);
 }
 
-export function disconnectLiveVideo() {
-  if (streamElement) {
-    streamElement.removeAttribute('src');
-    if (streamElement.load) streamElement.load();
-    streamElement.remove();
-    streamElement = null;
+/** Sets the AI service base URL and (re)connects the four tiles. */
+export function connectCameraStreams(baseUrl) {
+  stopStreams();
+  streams.base = baseUrl ? String(baseUrl).replace(/\/+$/, '') : null;
+  streams.statusWorks = false;
+  streams.statusFailures = 0;
+  streams.lastStatus = null;
+  syncStreams();
+}
+
+export function disconnectCameraStreams() {
+  streams.base = null;
+  stopStreams();
+}
+
+/** Snapshot of every tile, for console checks. */
+export function streamStates() {
+  const out = {};
+  for (const dir of STREAM_DIRS) {
+    const t = tiles[dir];
+    if (t) out[dir] = { state: t.state, hasImage: Boolean(t.img), width: t.img ? t.img.naturalWidth : 0 };
   }
-  el.placeholder.hidden = false;
-  el.placeholderText.textContent = 'Waiting for camera connection...';
-  updateCameraInfo({});
+  return out;
+}
+
+function shouldStream() {
+  return Boolean(streams.base) && !el.view.hidden && document.visibilityState !== 'hidden';
+}
+
+function syncStreams() {
+  if (shouldStream()) startStreams();
+  else stopStreams();
+}
+
+function startStreams() {
+  if (streams.active) return;
+  streams.active = true;
+  streams.ticks = 0;
+  for (const dir of STREAM_DIRS) {
+    const tile = tiles[dir];
+    tile.retryAt = 0;
+    tile.retryDelay = RETRY_MIN_MS;
+    setTileState(tile, 'connecting', 'Connecting to AI camera...');
+  }
+  streams.timer = setInterval(tick, TICK_MS);
+  tick();
+}
+
+function stopStreams() {
+  if (streams.timer) clearInterval(streams.timer);
+  streams.timer = null;
+  streams.active = false;
+  for (const dir of STREAM_DIRS) {
+    const tile = tiles[dir];
+    if (!tile) continue;
+    unmountStream(tile);
+    tile.sequence = null;
+    setTileState(tile, 'idle', streams.base ? 'Paused while this view is hidden' : 'Waiting for camera connection...');
+  }
+  renderSummary();
+}
+
+function tick() {
+  if (!streams.active) return;
+  // Without status (not reachable, or ALLOWED_ORIGINS not set) the tiles rely
+  // on image load/error events and retry with backoff.
+  if (!streams.statusOk) {
+    const now = Date.now();
+    for (const dir of STREAM_DIRS) {
+      const tile = tiles[dir];
+      if (!tile.img && now >= tile.retryAt) mountStream(tile);
+    }
+  }
+  if (streams.ticks % STATUS_EVERY_TICKS === 0) pollStatus();
+  streams.ticks += 1;
+}
+
+async function pollStatus() {
+  const base = streams.base;
+  let cameras = null;
+  try {
+    const res = await fetch(`${base}/api/cameras`, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
+    });
+    if (res.ok) {
+      const body = await res.json();
+      if (Array.isArray(body.cameras)) cameras = body.cameras;
+    }
+  } catch {
+    // Asleep, restarting, unreachable, or the origin is not allowed.
+  }
+  if (!streams.active || streams.base !== base) return;
+
+  if (!cameras) {
+    streams.statusOk = false;
+    streams.statusFailures += 1;
+    if (streams.statusWorks && streams.statusFailures >= 2) {
+      // Status worked before and failed twice in a row, so the service itself
+      // is down: drop the frozen images and let the retry loop reconnect.
+      for (const dir of STREAM_DIRS) {
+        const tile = tiles[dir];
+        if (tile.state !== 'reconnecting') scheduleRetry(tile, 'AI service unreachable - reconnecting...');
+      }
+    }
+    renderSummary();
+    return;
+  }
+
+  streams.statusOk = true;
+  streams.statusWorks = true;
+  streams.statusFailures = 0;
+  const now = Date.now();
+  const byDir = Object.fromEntries(cameras.map((c) => [c.direction, c]));
+  for (const dir of STREAM_DIRS) {
+    const tile = tiles[dir];
+    const cam = byDir[dir];
+    const sequence = cam && isNum(cam.frame_sequence) ? cam.frame_sequence : null;
+    if (cam && cam.available) {
+      // A lower sequence means the AI service restarted: the old connection is gone.
+      const restarted = tile.sequence !== null && sequence !== null && sequence < tile.sequence;
+      if ((!tile.img && now >= tile.retryAt) || restarted || tile.state === 'unavailable') mountStream(tile);
+    } else {
+      const failed = cam && (cam.status === 'open_failed' || cam.status === 'read_failed');
+      unmountStream(tile);
+      setTileState(tile, failed ? 'unavailable' : 'reconnecting',
+        failed ? 'Video unavailable - the AI service retries it automatically' : 'Reconnecting...');
+    }
+    tile.sequence = sequence;
+  }
+  updateDisplayFps(cameras);
+  renderSummary();
+}
+
+/** Frames per second the AI service publishes, from frame sequence numbers. */
+function updateDisplayFps(cameras) {
+  const now = performance.now();
+  const sequences = Object.fromEntries(cameras.map((c) => [c.direction, c.frame_sequence]));
+  const last = streams.lastStatus;
+  if (last) {
+    const rates = cameras
+      .filter((c) => c.available && isNum(last.sequences[c.direction]) && c.frame_sequence >= last.sequences[c.direction])
+      .map((c) => (c.frame_sequence - last.sequences[c.direction]) / ((now - last.at) / 1000));
+    streams.fps = rates.length ? Math.round((rates.reduce((a, b) => a + b, 0) / rates.length) * 10) / 10 : null;
+  }
+  streams.lastStatus = { at: now, sequences };
+}
+
+function setTileState(tile, state, message) {
+  tile.state = state;
+  tile.node.classList.toggle('reconnecting', state === 'reconnecting');
+  tile.node.classList.toggle('unavailable', state === 'unavailable');
+  if (message) tile.text.textContent = message;
+  tile.placeholder.hidden = state === 'live';
+}
+
+function scheduleRetry(tile, message) {
+  unmountStream(tile);
+  tile.retryAt = Date.now() + tile.retryDelay;
+  tile.retryDelay = Math.min(RETRY_MAX_MS, tile.retryDelay * 2);
+  setTileState(tile, 'reconnecting', message);
+}
+
+function mountStream(tile) {
+  unmountStream(tile);
+  const img = document.createElement('img');
+  img.alt = `${tile.dir.toUpperCase()} camera, AI annotated`;
+  img.decoding = 'async';
+
+  const onFirstFrame = () => {
+    if (tile.img !== img || tile.state === 'live') return;
+    tile.retryDelay = RETRY_MIN_MS;
+    setTileState(tile, 'live');
+    renderSummary();
+  };
+  img.addEventListener('load', onFirstFrame);
+  img.addEventListener('error', () => {
+    if (tile.img !== img) return;
+    scheduleRetry(tile, 'Reconnecting...');
+    renderSummary();
+  });
+  // MJPEG <img> streams do not reliably fire 'load'; watch for the first frame.
+  tile.firstFramePoll = setInterval(() => {
+    if (tile.img !== img) clearInterval(tile.firstFramePoll);
+    else if (img.naturalWidth > 0) {
+      clearInterval(tile.firstFramePoll);
+      onFirstFrame();
+    }
+  }, 300);
+
+  tile.img = img;
+  setTileState(tile, tile.state === 'reconnecting' ? 'reconnecting' : 'connecting');
+  // The query string only defeats caching of a previous, finished stream.
+  img.src = `${streams.base}/video/${tile.dir}?t=${Date.now()}`;
+  tile.stream.appendChild(img);
+}
+
+function unmountStream(tile) {
+  if (tile.firstFramePoll) clearInterval(tile.firstFramePoll);
+  tile.firstFramePoll = null;
+  const img = tile.img;
+  if (!img) return;
+  tile.img = null;
+  img.src = BLANK_IMAGE;
+  img.remove();
+}
+
+function renderSummary() {
+  if (!el.view) return;
+  if (!streams.base) {
+    updateLiveAIStatus({ state: 'offline', detail: streams.configLoaded ? undefined : 'Loading configuration...' });
+    updateCameraInfo({});
+    return;
+  }
+  const live = STREAM_DIRS.filter((d) => tiles[d].state === 'live');
+  const unavailable = STREAM_DIRS.filter((d) => tiles[d].state === 'unavailable');
+  if (!streams.active) {
+    updateLiveAIStatus({ state: 'offline', detail: 'Streams pause while the Live AI view is hidden' });
+  } else if (live.length === STREAM_DIRS.length) {
+    updateLiveAIStatus({ state: 'connected', detail: 'All 4 camera streams live' });
+  } else if (live.length) {
+    const missing = unavailable.length ? ` - ${unavailable.map(up).join(', ')} video unavailable` : '';
+    updateLiveAIStatus({ state: 'connected', detail: `${live.length} of 4 camera streams live${missing}` });
+  } else if (streams.statusWorks && !streams.statusOk) {
+    updateLiveAIStatus({ state: 'error' });
+  } else {
+    updateLiveAIStatus({ state: 'connecting' });
+  }
+  const first = live.length ? tiles[live[0]].img : null;
+  updateCameraInfo({
+    status: streams.active ? `${live.length}/4 streams live` : 'Paused',
+    source: streams.base,
+    fps: streams.statusOk ? streams.fps : null,
+    resolution: first && first.naturalWidth ? `${first.naturalWidth} x ${first.naturalHeight}` : undefined,
+  });
 }

@@ -29,7 +29,7 @@
         </svg>
         <div>
           <div class="brand-name">SMART TRAFFIC AI</div>
-          <div class="brand-sub">Adaptive signal control &middot; simulation prototype</div>
+          <div class="brand-sub">Adaptive signal control &middot; live AI camera data</div>
         </div>
       </div>
 
@@ -90,6 +90,8 @@
           <div class="vp-title" id="vp-title">-</div>
           <div class="vp-sub mono" id="vp-sub"></div>
           <div class="mode-badge" id="mode-badge" hidden>SIMULATED DATA - NOT REAL TRAFFIC</div>
+          <!-- Live traffic mode only: is the 3D scene driven by live AI data right now? -->
+          <div class="data-badge" id="data-badge" hidden></div>
         </div>
 
         <div class="vp-alerts">
@@ -118,6 +120,12 @@
           <span><i class="lg lg-yellow"></i>Yellow</span>
           <span><i class="lg lg-red"></i>Red</span>
           <span class="vp-hint">Drag to orbit &middot; scroll to zoom &middot; right-drag to pan</span>
+        </div>
+
+        <!-- Shown instead of numbers while there is no live AI data. -->
+        <div class="vp-data-state" id="vp-data-state" role="status" aria-live="polite">
+          <div class="vp-data-state-title" id="vp-data-state-title">Waiting for live data</div>
+          <div class="vp-data-state-text" id="vp-data-state-text">Connecting to the backend...</div>
         </div>
 
         <div class="vp-fallback" id="vp-fallback" hidden>3D view unavailable: WebGL is not supported in this browser.</div>
@@ -200,45 +208,90 @@
     </footer>
 
     <!-- ========================================================== live AI -->
-    <!-- What the AI camera sees. Placeholder until the Python/Flask service
-         is connected - see frontend/liveAI.js for the integration points. -->
+    <!-- What the four AI cameras see: annotated MJPEG streams loaded straight
+         from the Flask service (AI_STREAM_URL), see frontend/liveAI.js. -->
     <section class="live-ai" id="live-ai" role="tabpanel" aria-label="Live AI" hidden>
       <div class="lai-main">
         <div class="lai-camera">
           <div class="block-head">
-            <h2>Live camera</h2>
+            <h2>Live cameras</h2>
             <span class="meta mono" id="lai-cam-source">No source configured</span>
           </div>
-          <div class="lai-frame" id="lai-frame">
-            <div class="lai-placeholder" id="lai-placeholder">
-              <svg class="lai-cam-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="2.5" y="6" width="14" height="12" rx="1.5"></rect>
-                <path d="M16.5 10.5l5-3v9l-5-3z"></path>
-              </svg>
-              <div class="lai-ph-title">AI CAMERA FEED</div>
-              <div class="lai-ph-text" id="lai-ph-text">Waiting for camera connection...</div>
+          <!-- One tile per approach, in the AI service's camera order. liveAI.js
+               mounts each stream in .lai-stream and shows the placeholder while
+               a stream is connecting, reconnecting or unavailable. -->
+          <div class="lai-grid" id="lai-grid">
+            <div class="lai-frame lai-tile" data-dir="north">
+              <span class="lai-tile-name">NORTH</span>
+              <div class="lai-placeholder">
+                <svg class="lai-cam-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="2.5" y="6" width="14" height="12" rx="1.5"></rect>
+                  <path d="M16.5 10.5l5-3v9l-5-3z"></path>
+                </svg>
+                <div class="lai-ph-title">NORTH CAMERA</div>
+                <div class="lai-ph-text">Waiting for the AI service...</div>
+              </div>
+              <div class="lai-stream"></div>
             </div>
-            <!-- connectLiveVideo() mounts the stream element here -->
-            <div class="lai-stream" id="lai-stream"></div>
+            <div class="lai-frame lai-tile" data-dir="south">
+              <span class="lai-tile-name">SOUTH</span>
+              <div class="lai-placeholder">
+                <svg class="lai-cam-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="2.5" y="6" width="14" height="12" rx="1.5"></rect>
+                  <path d="M16.5 10.5l5-3v9l-5-3z"></path>
+                </svg>
+                <div class="lai-ph-title">SOUTH CAMERA</div>
+                <div class="lai-ph-text">Waiting for the AI service...</div>
+              </div>
+              <div class="lai-stream"></div>
+            </div>
+            <div class="lai-frame lai-tile" data-dir="west">
+              <span class="lai-tile-name">WEST</span>
+              <div class="lai-placeholder">
+                <svg class="lai-cam-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="2.5" y="6" width="14" height="12" rx="1.5"></rect>
+                  <path d="M16.5 10.5l5-3v9l-5-3z"></path>
+                </svg>
+                <div class="lai-ph-title">WEST CAMERA</div>
+                <div class="lai-ph-text">Waiting for the AI service...</div>
+              </div>
+              <div class="lai-stream"></div>
+            </div>
+            <div class="lai-frame lai-tile" data-dir="east">
+              <span class="lai-tile-name">EAST</span>
+              <div class="lai-placeholder">
+                <svg class="lai-cam-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="2.5" y="6" width="14" height="12" rx="1.5"></rect>
+                  <path d="M16.5 10.5l5-3v9l-5-3z"></path>
+                </svg>
+                <div class="lai-ph-title">EAST CAMERA</div>
+                <div class="lai-ph-text">Waiting for the AI service...</div>
+              </div>
+              <div class="lai-stream"></div>
+            </div>
           </div>
         </div>
 
         <section class="approaches lai-directions" id="lai-directions" aria-label="Detections by direction">
           <div class="ap" data-dir="north">
             <div class="ap-head"><span class="lamp"></span><span class="ap-name">NORTH</span></div>
-            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">--</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-note" data-field="note"></div>
           </div>
           <div class="ap" data-dir="south">
             <div class="ap-head"><span class="lamp"></span><span class="ap-name">SOUTH</span></div>
-            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">--</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-note" data-field="note"></div>
           </div>
           <div class="ap" data-dir="east">
             <div class="ap-head"><span class="lamp"></span><span class="ap-name">EAST</span></div>
-            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">--</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-note" data-field="note"></div>
           </div>
           <div class="ap" data-dir="west">
             <div class="ap-head"><span class="lamp"></span><span class="ap-name">WEST</span></div>
-            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">--</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-note" data-field="note"></div>
           </div>
         </section>
       </div>
@@ -250,15 +303,15 @@
             <span class="dot"></span>
             <span class="lai-status-label" id="lai-status-label">OFFLINE / NOT CONNECTED</span>
           </div>
-          <div class="sub" id="lai-status-detail">Waiting for AI connection - placeholder until the Flask service is connected</div>
+          <div class="sub" id="lai-status-detail">Waiting for the AI service</div>
         </section>
 
         <section class="block">
           <div class="block-head"><h2>Detection summary</h2></div>
           <dl class="decision lai-summary">
-            <div class="kv"><dt>Vehicles</dt><dd><span class="big mono" id="lai-sum-vehicles">0</span></dd></div>
-            <div class="kv"><dt>Pedestrians</dt><dd><span class="big mono" id="lai-sum-pedestrians">0</span></dd></div>
-            <div class="kv"><dt>Emergency vehicles</dt><dd><span class="big mono" id="lai-sum-emergency">0</span></dd></div>
+            <div class="kv"><dt>Vehicles</dt><dd><span class="big mono" id="lai-sum-vehicles">--</span></dd></div>
+            <div class="kv"><dt>Pedestrians</dt><dd><span class="big mono" id="lai-sum-pedestrians">--</span></dd></div>
+            <div class="kv"><dt>Emergency vehicles</dt><dd><span class="big mono" id="lai-sum-emergency">--</span></dd></div>
             <div class="kv"><dt>AI confidence</dt><dd><span class="big mono" id="lai-sum-confidence">--</span></dd></div>
           </dl>
         </section>

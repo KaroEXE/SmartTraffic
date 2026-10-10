@@ -14,12 +14,41 @@ it uses the Leaflet and Socket.IO client files the backend already serves.
 | `navMap.js`, `layersPanel.js` | Leaflet map, layers, legend |
 | `searchBox.js`, `geocoder.js` | Destination search (Nominatim) |
 | `routeService.js`, `routePanel.js`, `routeTraffic.js` | Routing (OSRM), route sheet, route vs. live observations |
+| `routeRanking.js` | Four routes ranked best to worst: live delay estimate, ordering, distinct-route checks |
 | `trafficFeed.js`, `trafficStore.js` | Socket.IO subscription (live room only) and freshness |
 | `hazardService.js` | Speed cameras / bumps / closures, replaceable provider |
 | `status.js`, `format.js`, `geo.js` | Offline/notices, formatting, geometry |
 | `manifest.webmanifest`, `icon.svg` | PWA metadata (no service worker yet, so no offline mode) |
 
-Unit tests: `backend/test/navigation.test.js` (`npm test` in `backend/`).
+Unit tests: `backend/test/navigation.test.js` and `backend/test/routeRanking.test.js` (`npm test` in `backend/`).
+
+## Four ranked routes
+
+The page shows up to four routes between the same start and destination,
+ranked by estimated travel time (distance breaks ties) and drawn green
+(Route 1, best, on top) -> yellow-green -> orange -> red (Route 4, slowest).
+The route list is the legend: tapping an entry or a line highlights it.
+
+- **Where they come from.** One OSRM request with alternatives. When OSRM
+  returns fewer than four, `findMoreRoutes` asks the same OSRM server for
+  routes through via points beside the direct line, each first moved onto a
+  nearby named road (`/nearest`). A candidate is kept only if it runs on
+  different roads (less than 80% shared with every other route), does not
+  double back, and is not more than 2.5x the fastest time. Requests are
+  spaced 1.1 s apart and stop once four routes exist. If the road network
+  offers fewer distinct routes, fewer are shown and the page says so.
+- **Estimate.** OSRM travel time plus, for each AI-monitored intersection
+  the route passes (within 60 m), a live delay for the approach the route
+  enters by: the mean wait of the stopped vehicles on that approach plus 2 s
+  per vehicle on it (`traffic.secondsPerVehicle`). This is the same live
+  data the backend broadcasts to the dashboard.
+- **Updates.** Every live update re-ranks from data already on the page; no
+  route is re-requested. Lines and list entries are recoloured and moved in
+  place. Two routes swap only when their estimates differ by more than 5 s
+  (`traffic.rankHysteresisSeconds`), so near-ties do not flicker.
+- **No live data** (feed stale, video unavailable, or no route passes the
+  intersection): ranking uses OSRM times only, and the note above the list
+  says live traffic is not included.
 
 ## External providers (no keys, nothing secret in the frontend)
 
@@ -51,11 +80,13 @@ dataMode
 **Not available yet** (so traffic is drawn as points at intersections, never
 as coloured road segments):
 
-- Road geometry or bearing for each approach, e.g. `approaches.<dir>.bearing`
-  (degrees) or a GeoJSON line per approach. Without it the page cannot tell
-  which approach a route uses or colour the road.
-- Surveyed coordinates. `backend/config/intersections.js` says its positions
-  are placeholders. Route matching (within 60 m of the line) uses them as-is.
+- Road geometry for each approach. The approach a route uses is inferred
+  from the route's heading as it reaches the intersection (heading south =
+  entering from the north approach), which assumes the cameras' north/south/
+  east/west match the compass.
+- Surveyed coordinates. Set `INTERSECTION_LAT` / `INTERSECTION_LNG` on the
+  backend; the default position is a placeholder that no through-route
+  passes. Route matching (within 60 m of the line) uses it as-is.
 
 ## Backend endpoints the page is ready for (not implemented)
 
@@ -63,7 +94,7 @@ as coloured road segments):
 
 ```
 POST <trafficRoutesUrl>
-{ "start": {"lat","lng"}, "destination": {"lat","lng"}, "maxRoutes": 3 }
+{ "start": {"lat","lng"}, "destination": {"lat","lng"}, "maxRoutes": 4 }
 
 200 { "routes": [ {
   "geometry": { "type": "LineString", "coordinates": [[lng, lat], ...] },
