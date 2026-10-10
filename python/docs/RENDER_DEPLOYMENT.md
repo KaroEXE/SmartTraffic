@@ -84,15 +84,17 @@ Use placeholders like these; set real values only in the Render dashboard.
 | Variable | Example | Notes |
 | --- | --- | --- |
 | `PYTHON_VERSION` | `3.12.10` | The version the tests ran on. Every pinned package has Linux wheels for it. |
-| `VIDEO_NORTH`, `VIDEO_SOUTH`, `VIDEO_WEST`, `VIDEO_EAST` | `rtsp://camera.example/north` | **Required.** See [Video sources](#video-sources-on-render). |
+| `VIDEO_SOURCE_MODE` | `files` | Default `files`: loop `videos/video1.mp4` (north), `video2.mp4` (south), `video3.mp4` (west), `video4.mp4` (east). `cameras`: use the `VIDEO_*` sources. See [Video sources](#video-sources-on-render). |
+| `DETECTION_FRAME_STRIDE` | `2` | YOLO runs on every Nth processed frame of each stream. Playback stays real time either way. |
+| `VIDEO_NORTH`, `VIDEO_SOUTH`, `VIDEO_WEST`, `VIDEO_EAST` | `rtsp://camera.example/north` | `cameras` mode only. |
 | `BACKEND_URL` | `https://your-backend.onrender.com` | Base URL. Observations go to `/api/traffic`. |
 | `INTERSECTION_ID` | `main` | Must exist in the backend's `config/intersections.js`. |
 | `TRAFFIC_INGEST_TOKEN` | *(random secret)* | Same value on both services, for example from `openssl rand -hex 32`. |
 | `YOLO_DEVICE` | `cpu` | `auto` also selects the CPU when there is no CUDA. |
 | `PIPELINE_RESTART_SECONDS` | `10` | `0` disables automatic restarts. |
-| `ALLOWED_ORIGINS` | `https://your-backend.onrender.com` | Only for browser `fetch()` of this service's JSON. `<img>` video needs no CORS. |
+| `ALLOWED_ORIGINS` | `https://your-backend.onrender.com` | The Node site's URL. Its Live AI tab reads `/api/cameras` for stream status. `<img>` video needs no CORS. |
 | `DISPLAY_FPS` | `4` | MJPEG frame rate only. Lower values save CPU. |
-| `MAX_STREAM_CLIENTS` | `8` | Simultaneous `/video/*` viewers. |
+| `MAX_STREAM_CLIENTS` | `16` | Simultaneous `/video/*` viewers. One browser on the Live AI tab uses four. |
 | `LOG_LEVEL` | `INFO` | `DEBUG` adds pipeline failure tracebacks. |
 | `ROBOFLOW_API_KEY`, `ROBOFLOW_WORKSPACE`, `ROBOFLOW_WORKFLOW_ID` | *(optional secret)* | Emergency-vehicle sampling. Without these, no emergency data is sent. |
 | `OMP_NUM_THREADS` | `1` | Ultralytics' default. Raise it only on multi-CPU instance types. |
@@ -104,7 +106,20 @@ On Render, gunicorn binds to `0.0.0.0:$PORT`. `wsgi.py` also defaults
 
 ## Backend (Node.js) changes and settings
 
-Two compatible backend changes were needed:
+Live views have a single data path: AI observations (`POST /api/traffic`) ->
+decision engine -> Socket.IO room `live` -> dashboard, Live AI tab, 3D view
+and driver navigation. `config/intersections.js` lists only `main`, the
+intersection the four videos watch; set its real position with
+`INTERSECTION_LAT` / `INTERSECTION_LNG` (the default is a placeholder).
+
+The dashboard's **Simulation** tab is the only place simulated data exists. It
+has its own generator, decision engine, store, intersection list
+(`config/simulationIntersections.js`), REST routes (`/api/simulation`) and
+Socket.IO room, is idle until started from the dashboard, and is labelled
+SIMULATED DATA everywhere it is shown. Simulated observations cannot enter
+`POST /api/traffic` (the `simulation` and `mock` source tags are rejected).
+
+Backend changes this integration relies on:
 
 1. **Ingest token.** When `TRAFFIC_INGEST_TOKEN` is set on the backend,
    `POST /api/traffic` requires `Authorization: Bearer <token>`; otherwise it
@@ -116,6 +131,15 @@ Two compatible backend changes were needed:
    truck. The backend now also accepts `"emergency"` (aliases `emergency_car`,
    `emergency_vehicle`). Before this change, the backend rejected the whole
    observation with HTTP 400 whenever an emergency was reported.
+3. **Unavailable approaches.** An approach may be `null` when its video is
+   missing or unreadable. The backend keeps it as unavailable (counts `null`,
+   `available: false`); the dashboard shows "Video unavailable" for it instead
+   of zero, and the decision engine still serves it after `MAX_RED_TIME`.
+4. **Optional detail per approach.** `classes` (vehicles per YOLO class) and
+   `confidence` (mean detection confidence) drive the 3D vehicle models and
+   the Live AI confidence. Snapshots also carry `detectors` (whether
+   pedestrian and emergency detection run), so the dashboard shows "off"
+   instead of "none detected".
 
 The backend also needs `CORS_ORIGIN` as before. Server-to-server POSTs from
 Python do not use CORS.
@@ -126,8 +150,10 @@ Python do not use CORS.
 - **Headers:** `Content-Type: application/json`, and
   `Authorization: Bearer <TRAFFIC_INGEST_TOKEN>` when configured.
 - **Rate:** at most once per `BACKEND_PUBLISH_INTERVAL` (1 s), and only when a
-  new measurement exists for all four approaches. The backend's
-  `DATA_TIMEOUT` is 10 s.
+  new measurement exists for every approach that has a video (an approach
+  without one is sent as `null`). Nothing is sent while no video plays. The
+  backend's `DATA_TIMEOUT` is 10 s: after that the dashboard shows the data
+  as stale.
 
 ```json
 {
@@ -135,10 +161,13 @@ Python do not use CORS.
   "timestamp": "2026-10-09T12:42:16.841Z",
   "source": "python-ai",
   "traffic": {
-    "north": {"vehicles": 3, "queueLength": 2, "waitingTime": 4.5},
-    "south": {"vehicles": 0, "queueLength": 0, "waitingTime": 0},
-    "east":  {"vehicles": 1, "queueLength": 1, "waitingTime": 0.8},
-    "west":  {"vehicles": 2, "queueLength": 0, "waitingTime": 0}
+    "north": {"vehicles": 3, "queueLength": 2, "waitingTime": 4.5,
+              "classes": {"bus": 1, "car": 2}, "confidence": 0.55},
+    "south": {"vehicles": 0, "queueLength": 0, "waitingTime": 0,
+              "classes": {}, "confidence": null},
+    "east":  {"vehicles": 1, "queueLength": 1, "waitingTime": 0.8,
+              "classes": {"car": 1}, "confidence": 0.61},
+    "west":  null
   },
   "emergency": {"detected": false, "type": null, "direction": null, "confidence": 0}
 }
@@ -151,11 +180,15 @@ What each field means:
 | `vehicles` | Trusted vehicle detections (confidence ≥ 0.35) in the latest measurement. |
 | `queueLength` | Vehicles confirmed STOPPED. |
 | `waitingTime` | Mean seconds those vehicles have been stopped, in video time, capped at the backend's 3600. |
-| `timestamp` | The oldest of the four measurement times. |
+| `classes` | Trusted detections per YOLO class (`car`, `bus`, `truck`, `motorcycle`). |
+| `confidence` | Mean YOLO confidence of the vehicle detections; `null` when there are none. |
+| `null` approach | That direction's video is missing or unreadable. |
+| `timestamp` | The oldest of the measurement times. |
 | `emergency` | Present only when Roboflow sampling is enabled. `detected: true` only after the pipeline's 3-sample confirmation, with the latest positive sample's confidence. The backend acts on confidence ≥ 0.8 (`EMERGENCY_CONFIDENCE_THRESHOLD`). |
 
-`pedestrians` is never sent: the active pipeline measures no pedestrians, and
-the backend treats the missing field as no one waiting.
+`pedestrians` is never sent: the active pipeline measures no pedestrians. The
+backend records that pedestrian detection does not run (`detectors`), and the
+dashboard says so instead of showing zero.
 
 Backend responses:
 
@@ -178,10 +211,40 @@ room `live`.
 
 ## Video sources on Render
 
-A Render instance has no attached camera, and `videos/` is not in Git
-(`.gitignore`). Without `VIDEO_*` overrides, the service starts, `/api/health`
-shows the NORTH camera as `open_failed`, and the supervisor retries with
-backoff. Nothing is sent to the backend. Workable sources:
+By default (`VIDEO_SOURCE_MODE=files`) the service plays four videos that ship
+in Git, listed in `VIDEO_FILES` in `config/config.py`:
+
+| Direction | File |
+| --- | --- |
+| North | `videos/video1.mp4` |
+| South | `videos/video2.mp4` |
+| West | `videos/video3.mp4` |
+| East | `videos/video4.mp4` |
+
+Paths resolve from the `python/` folder, so they work locally and on Render.
+Only these four files are tracked by Git (`.gitignore`); any other video in
+`videos/` stays local. To change the direction mapping, reorder `VIDEO_FILES`.
+
+- The streams start when the service starts (deploy, restart, crash recovery);
+  no browser or request is needed.
+- Each video plays at its own frame rate. When inference falls behind, frames
+  are skipped instead of slowing the video down.
+- At the end it restarts from frame 0 at once. Only that stream's tracker and
+  vehicle history are reset (the track-ID counter shared by all four is
+  kept), so track IDs and waiting times never carry over, nothing is counted
+  twice, and the other streams are not touched.
+- A missing or unreadable file (or one deleted while playing, noticed at the
+  next loop) is logged, that direction's `/video/<direction>` answers 503 and
+  `/api/cameras` shows `open_failed` / `read_failed`; the Live AI tile shows
+  "Video unavailable". The other three keep playing and sending data, with
+  that approach sent as unavailable. The file is retried after 2 s, doubling
+  up to every 30 s, and plays again as soon as it is back. `/api/health`
+  lists missing files and loop counts under `components.sources`.
+
+To use cameras again, set `VIDEO_SOURCE_MODE=cameras` and the `VIDEO_*`
+sources. In that mode, without `VIDEO_*` overrides, the service starts,
+`/api/health` shows the NORTH camera as `open_failed`, and the supervisor
+retries with backoff. Workable camera sources:
 
 - RTSP, HTTP or HLS camera streams reachable from the public internet.
 - MP4 files served over HTTPS, for example release assets or object storage.
@@ -207,8 +270,25 @@ Render's CPUs will differ; expect slower inference on shared vCPUs. On that
 basis:
 
 - **Free and Starter** (512 MB) are too small; the service would be killed for
-  memory. Free instances also sleep when idle.
+  memory.
 - **Standard** (2 GB, 1 CPU) is the realistic minimum.
+
+### Always ready: sleeping instances
+
+Render's **free** web services spin down after about 15 minutes without
+inbound HTTP traffic and take about a minute to start again on the next
+request. Background work does not count as traffic: a sleeping AI service
+stops its video loops and stops posting, and a sleeping backend stops serving
+the dashboard. After a wake-up everything recovers on its own (streams start
+at boot, the publisher retries, browsers reconnect), but the first visitor
+waits for the cold start and sees "Waiting for live data" until the first
+measurements arrive.
+
+Paid instance types (Starter and above) never spin down. For an always-ready
+system, run **both** services on a paid type: the AI service on Standard or
+larger (memory), the backend on Starter or larger. Pinging a free service
+from outside to keep it awake works against Render's free-tier terms and
+still restarts it at times, so it is not a substitute.
 - Render offers no GPU instances. Inference here is CPU-only and nothing
   claims otherwise; `/api/health` reports `components.inference.device`.
 
@@ -217,9 +297,11 @@ the frames actually processed, and the dashboard simply updates less often.
 
 ## Deployment checklist
 
-1. Commit and push the changes in `python/` and `SmartTraffic backend/backend/`.
-2. Backend service: add `TRAFFIC_INGEST_TOKEN` and redeploy. Check its
-   `/api/health`: `ingestion.tokenRequired` must be `true`.
+1. Commit and push the changes in `python/` (including the four videos in
+   `python/videos/`) and `SmartTraffic backend/`.
+2. Backend service: add `TRAFFIC_INGEST_TOKEN` and `AI_STREAM_URL` (the AI
+   service's URL) and redeploy. Check its `/api/health`:
+   `ingestion.tokenRequired` must be `true`.
 3. AI service: apply the settings and variables above, with the same token.
 4. Deploy, and read the build log for
    `yolo26n.pt: downloaded 5544453 bytes, SHA-256 verified`.
@@ -229,12 +311,15 @@ the frames actually processed, and the dashboard simply updates less often.
      cameras produce fresh data. Otherwise it returns 503; check `reason`,
      `components.supervisor` and `components.backend_publisher`.
    - `curl https://<ai>.onrender.com/api/cameras` shows four `processing` cameras.
+   - `curl https://<ai>.onrender.com/api/health` lists `components.sources.loops`,
+     which grow by one each time a video restarts.
    - `curl https://<backend>.onrender.com/api/traffic/observations/main`
      shows `source: "python-ai"` with a recent `receivedAt`.
    - `curl https://<backend>.onrender.com/api/health` shows
      `aiFeeds.connected` ≥ 1.
-   - The dashboard shows the intersection as connected in `NORMAL` mode,
-     not `FALLBACK`.
+   - The dashboard shows `LIVE AI DATA` on the 3D view and `NORMAL` mode, the
+     Live AI tab shows four annotated videos, and the numbers on the approach
+     cards, the 3D tags and the Live AI cards agree.
 6. Open `https://<ai>.onrender.com/video/north`. MJPEG through Render's proxy
    was not tested before deployment; if it buffers, the JSON integration is
    unaffected.

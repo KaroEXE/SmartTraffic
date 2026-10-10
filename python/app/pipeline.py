@@ -13,15 +13,47 @@ import cv2
 import numpy as np
 
 from app.services.snapshot import build_snapshot
-from config.config import MODEL_PATH, YOLO_DEVICE, names, videos
+from config.config import (
+    DETECTION_FRAME_STRIDE,
+    MODEL_PATH,
+    VIDEO_FILES,
+    VIDEO_SOURCE_MODE,
+    YOLO_DEVICE,
+    names,
+    videos,
+)
 from emergency.emergency_priority import (
     EmergencyPriority,
     EmergencySettings,
     RoboflowSampler,
 )
-from video_work.video_io import open_video
+from video_work.video_io import LoopingVideoFile, fit_frame, open_video, unavailable_frame
 
 log = logging.getLogger(__name__)
+
+# Files mode: a missing or unreadable video is retried after this many seconds,
+# doubling after each failed attempt up to the maximum. Only that stream waits.
+MISSING_RETRY_SECONDS = 2.0
+MISSING_RETRY_MAX_SECONDS = 30.0
+# Size of every annotated frame (the AI service's original 2 x 2 grid cell).
+DISPLAY_SIZE = (640, 480)
+
+
+def reset_tracker(model):
+    """Forget one stream's ByteTrack tracks while keeping IDs unique across streams.
+
+    BYTETracker.reset() also zeroes the track-ID counter that all four
+    trackers share, which would hand out IDs still in use on other streams.
+    """
+    trackers = getattr(getattr(model, "predictor", None), "trackers", None)
+    if not isinstance(trackers, list) or not trackers:
+        return
+    from ultralytics.trackers.basetrack import BaseTrack
+
+    next_id = BaseTrack._count
+    for tracker in trackers:
+        tracker.reset()
+    BaseTrack._count = next_id
 
 
 def resolve_device(setting=YOLO_DEVICE):
@@ -61,14 +93,60 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
         log.info("YOLO inference device: %s", device)
         if publisher is not None:
             publisher.report_component("inference", {"device": str(device), "model": MODEL_PATH.name})
-        for i, video in enumerate(videos):
+        files_mode = VIDEO_SOURCE_MODE == "files"
+        # Files mode: one looping video per direction. A missing or unreadable
+        # file leaves only that direction without frames and measurements.
+        retry_at = [0.0] * 4
+        retry_delay = [MISSING_RETRY_SECONDS] * 4
+        loops_seen = [0] * 4
+
+        def schedule_retry(i):
+            retry_at[i] = time.monotonic() + retry_delay[i]
+            retry_delay[i] = min(retry_delay[i] * 2, MISSING_RETRY_MAX_SECONDS)
+
+        def open_file(i, *, retry=False):
+            try:
+                camera = LoopingVideoFile(VIDEO_FILES[i], stop_event=stop_event)
+            except (OSError, RuntimeError) as exc:
+                schedule_retry(i)
+                if not retry:
+                    log.error("%s video %s cannot be played (%s). The other streams keep "
+                              "running; retrying every %.0f-%.0f s.", names[i], VIDEO_FILES[i], exc,
+                              MISSING_RETRY_SECONDS, MISSING_RETRY_MAX_SECONDS)
+                if publisher is not None:
+                    publisher.camera_status(i, "open_failed")
+                return None
+            retry_delay[i] = MISSING_RETRY_SECONDS
+            if retry:
+                log.info("%s video %s is available again", names[i], VIDEO_FILES[i])
+            if publisher is not None:
+                publisher.camera_status(i, "opened")
+            return camera
+
+        def report_sources():
+            if publisher is not None and files_mode:
+                publisher.report_component("sources", {
+                    "mode": "files",
+                    "files": {names[k].lower(): VIDEO_FILES[k] for k in range(4)},
+                    "missing": [names[k].lower() for k in range(4) if cameras[k] is None],
+                    "loops": {names[k].lower(): cameras[k].loops
+                              for k in range(4) if cameras[k] is not None},
+                })
+
+        for i, video in enumerate(VIDEO_FILES if files_mode else videos):
             if stop_event is not None and stop_event.is_set():
                 return
             if publisher is not None:
                 publisher.camera_status(i, "opening")
+            if files_mode:
+                cameras.append(open_file(i))
+                continue
             cameras.append(open_video(video))
             if publisher is not None:
                 publisher.camera_status(i, "opened")
+        if files_mode:
+            log.info("Video sources: looping files %s", ", ".join(VIDEO_FILES))
+            report_sources()
 
         models = [
             YOLO(str(MODEL_PATH)),
@@ -82,7 +160,7 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
 
         for camera in cameras:
 
-            fps = camera.get(cv2.CAP_PROP_FPS)
+            fps = camera.get(cv2.CAP_PROP_FPS) if camera is not None else None
 
             if fps is None or fps <= 1 or math.isnan(fps):
 
@@ -105,6 +183,9 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
             None,
             None
         ]
+
+        # Where the video sits inside each 640 x 480 annotated frame.
+        frame_rects = [(0, 0) + DISPLAY_SIZE] * 4
 
 
         have_measurement = [
@@ -372,13 +453,54 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
             video_ended = False
 
             did_measure_this_cycle = (
-                frame_counter % 2 == 0
+                frame_counter % DETECTION_FRAME_STRIDE == 0
             )
 
 
             for i in range(4):
 
+                if files_mode and cameras[i] is None:
+                    if time.monotonic() >= retry_at[i]:
+                        cameras[i] = open_file(i, retry=True)
+                        if cameras[i] is not None:
+                            loops_seen[i] = 0
+                            reset_tracker(models[i])
+                            track_states[i].clear()
+                            last_measure_times[i] = None
+                            report_sources()
+                    if cameras[i] is None:
+                        # No source: no measurement and no published frame for
+                        # this direction. The placeholder is only drawn on.
+                        frames.append(unavailable_frame(names[i]))
+                        continue
+
                 success, frame = cameras[i].read()
+
+                if not success and files_mode:
+                    log.error("%s video %s stopped playing. The other streams keep running; "
+                              "retrying every %.0f-%.0f s.", names[i], VIDEO_FILES[i],
+                              MISSING_RETRY_SECONDS, MISSING_RETRY_MAX_SECONDS)
+                    cameras[i].release()
+                    cameras[i] = None
+                    schedule_retry(i)
+                    have_measurement[i] = False
+                    measurements[i] = None
+                    last_frames[i] = None
+                    if publisher is not None:
+                        publisher.camera_status(i, "read_failed")
+                    report_sources()
+                    frames.append(unavailable_frame(names[i]))
+                    continue
+
+                if files_mode and cameras[i].loops != loops_seen[i]:
+                    # The video restarted from frame 0: forget this stream's
+                    # tracks and motion history so nothing carries over.
+                    loops_seen[i] = cameras[i].loops
+                    reset_tracker(models[i])
+                    track_states[i].clear()
+                    last_measure_times[i] = None
+                    log.debug("%s video looped (loop %d)", names[i], loops_seen[i])
+                    report_sources()
 
                 if not success:
 
@@ -399,8 +521,9 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
                 emergency_sampler.submit(i, frame, time.monotonic())
 
                 video_time = (
-                    frames_read[i]
-                    / video_fps[i]
+                    cameras[i].video_time
+                    if files_mode
+                    else frames_read[i] / video_fps[i]
                 )
 
 
@@ -436,6 +559,9 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
                     tracked_vehicle_count = 0
 
                     confidences = []
+
+                    # Trusted detections per YOLO class (car, bus, ...).
+                    class_counts = {}
 
                     seen_track_ids = set()
 
@@ -508,6 +634,7 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
 
 
                         trusted_vehicle_count += 1
+                        class_counts[class_name] = class_counts.get(class_name, 0) + 1
 
 
                         # A tracked ID is required to compare vehicle positions
@@ -936,17 +1063,18 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
                         # Video-time seconds the currently STOPPED vehicles have waited.
                         "mean_wait_seconds": sum(wait_times) / len(wait_times) if wait_times else 0.0,
                         "max_wait_seconds": max(wait_times, default=0.0),
+                        "class_counts": class_counts,
                         "measured_at": time.time(),
                     }
 
 
                     # ------------------------------------------
-                    # RESIZE
+                    # RESIZE (aspect kept: portrait videos are pillarboxed)
                     # ------------------------------------------
 
-                    annotated_frame = cv2.resize(
+                    annotated_frame, frame_rects[i] = fit_frame(
                         annotated_frame,
-                        (640, 480)
+                        DISPLAY_SIZE
                     )
 
 
@@ -1388,14 +1516,42 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
             # DRAW TRAFFIC LIGHT STATE
             # ==================================================
 
+            # Published frames carry YOLO detections and Roboflow samples only.
+            # The website's signal state comes from the Node backend, so this
+            # loop's own controller overlay (light, timer, mode) is drawn only
+            # on the local OpenCV window and can never contradict the dashboard.
+            web_frames = []
             display_frames = []
 
 
             for i in range(4):
 
-                display_frame = (
+                web_frame = (
                     frames[i].copy()
                 )
+
+                emergency_status, emergency_boxes = emergency_priority.display(i, current_time)
+                if not emergency_sampler.enabled:
+                    emergency_status = "OFF - NO API KEY"
+                cv2.putText(web_frame, f"RF: {emergency_status}", (30, 190),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 180, 0), 2)
+                left, top, width, height = frame_rects[i]
+                for detection in emergency_boxes:
+                    # These are the latest sampled boxes, not live YOLO tracks.
+                    x1, y1, x2, y2 = detection.xyxy
+                    p1 = (int(left + x1 * width), int(top + y1 * height))
+                    p2 = (int(left + x2 * width), int(top + y2 * height))
+                    cv2.rectangle(web_frame, p1, p2, (255, 180, 0), 2)
+                    cv2.putText(web_frame, f"RF SAMPLE {detection.confidence:.2f}",
+                                (p1[0], max(20, p1[1] - 8)), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5, (255, 180, 0), 2)
+
+                web_frames.append(web_frame)
+
+                if not show_window:
+                    continue
+
+                display_frame = web_frame.copy()
 
 
                 # ----------------------------------------------
@@ -1419,22 +1575,9 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
                     2
                 )
 
-                emergency_status, emergency_boxes = emergency_priority.display(i, current_time)
-                if not emergency_sampler.enabled:
-                    emergency_status = "OFF - NO API KEY"
-                cv2.putText(display_frame, f"RF: {emergency_status}", (30, 190),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 180, 0), 2)
                 if light_phase == "ALL_RED":
                     cv2.putText(display_frame, "ALL RED - CLEARANCE", (30, 220),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
-                for detection in emergency_boxes:
-                    # These are the latest sampled boxes, not live YOLO tracks.
-                    x1, y1, x2, y2 = detection.xyxy
-                    p1, p2 = (int(x1 * 640), int(y1 * 480)), (int(x2 * 640), int(y2 * 480))
-                    cv2.rectangle(display_frame, p1, p2, (255, 180, 0), 2)
-                    cv2.putText(display_frame, f"RF SAMPLE {detection.confidence:.2f}",
-                                (p1[0], max(20, p1[1] - 8)), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.5, (255, 180, 0), 2)
 
 
                 if controller_started:
@@ -1532,7 +1675,9 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
 
             if publisher is not None:
                 publisher.publish_snapshot(build_snapshot(locals()))
-                publisher.offer_frames(display_frames)
+                # A direction without a source publishes no frame (its stream answers 503).
+                publisher.offer_frames([None if files_mode and cameras[k] is None else frame
+                                        for k, frame in enumerate(web_frames)])
 
             if not show_window:
                 continue
@@ -1588,7 +1733,8 @@ def run(*, stop_event=None, publisher=None, show_window=True, max_cycles=None):
         if emergency_sampler is not None:
             emergency_sampler.close()
         for camera in cameras:
-            camera.release()
+            if camera is not None:
+                camera.release()
         if show_window:
             cv2.destroyAllWindows()
         if publisher is not None:

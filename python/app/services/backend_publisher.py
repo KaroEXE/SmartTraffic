@@ -9,21 +9,26 @@ The contract is the backend's own (SmartTraffic backend/backend):
     "intersectionId": "main",                    an id from config/intersections.js
     "timestamp": "2026-10-09T12:00:00.000Z",     oldest of the four measurement times
     "source": "python-ai",
-    "traffic": {"north": {"vehicles": 3, "queueLength": 2, "waitingTime": 4.5},
-                "south": {...}, "east": {...}, "west": {...}},
+    "traffic": {"north": {"vehicles": 3, "queueLength": 2, "waitingTime": 4.5,
+                          "classes": {"car": 2, "bus": 1}, "confidence": 0.71},
+                "south": {...}, "east": {...}, "west": null},
     "emergency": {"detected": false, "type": null, "direction": null, "confidence": 0}
   }
 
 Per approach: vehicles = trusted vehicle detections (confidence >= 0.35),
 queueLength = confirmed STOPPED vehicles, waitingTime = their mean stopped time
-in video seconds. "emergency" is sent only when Roboflow sampling is enabled and
-reports the pipeline's confirmed emergency (three positive samples). The active
-pipeline measures no pedestrians, so "pedestrians" is omitted (the backend then
-assumes none are waiting) rather than invented.
+in video seconds, classes = trusted detections per YOLO class, confidence = mean
+YOLO confidence of the vehicle detections (null when there are none). An
+approach whose video is missing or unreadable is sent as null: the backend
+shows it as unavailable instead of receiving made-up numbers. "emergency" is
+sent only when Roboflow sampling is enabled and reports the pipeline's
+confirmed emergency (three positive samples). The active pipeline measures no
+pedestrians, so "pedestrians" is omitted rather than invented.
 
-Nothing is sent until all four approaches have a fresh measurement. One daemon
-thread posts the newest observation at most once per interval; failures back
-off and nothing is queued, so an unreachable backend never grows memory.
+Nothing is sent until every approach with a video has a measurement, and
+nothing at all while no video plays. One daemon thread posts the newest
+observation at most once per interval; failures back off and nothing is
+queued, so an unreachable backend never grows memory.
 """
 
 import json
@@ -50,6 +55,9 @@ DIRECTIONS = ("north", "south", "east", "west")
 # Mirrors LIMITS and EMERGENCY_TYPES in the backend's utils/validation.js.
 LIMITS = {"vehicles": 1000, "queueLength": 1000, "waitingTime": 3600}
 EMERGENCY_TYPES = ("ambulance", "police", "fire_truck", "emergency")
+# Mirrors CLASS_PATTERN / MAX_CLASSES in validation.js.
+CLASS_PATTERN = re.compile(r"^[a-z][a-z ]{0,31}$")
+MAX_CLASSES = 16
 # The Roboflow workflow's only class is "emergency-car", so the service type
 # (ambulance/police/fire) is unknown; the backend accepts the generic type.
 EMERGENCY_TYPE = "emergency"
@@ -130,17 +138,26 @@ def build_observation(state, intersection_id):
     traffic, measured = {}, []
     for name in DIRECTIONS:
         entry = directions.get(name) or {}
+        if entry.get("source_available") is False:
+            traffic[name] = None  # no video for this approach: unavailable, not zero
+            continue
         vehicles, queue = entry.get("trusted_vehicles"), entry.get("stopped_vehicles")
         wait, measured_at = entry.get("mean_wait_seconds"), entry.get("measured_at")
         if vehicles is None or queue is None or wait is None or measured_at is None:
             return None  # this approach has no measurement yet: send nothing
+        confidence = entry.get("average_confidence")
         traffic[name] = {
             "vehicles": int(vehicles),
             "queueLength": int(queue),
             # Backend maximum; only a vehicle parked in view for an hour exceeds it.
             "waitingTime": round(min(float(wait), LIMITS["waitingTime"]), 1),
+            "classes": {str(label): int(count) for label, count
+                        in sorted((entry.get("class_counts") or {}).items())},
+            "confidence": round(float(confidence), 3) if confidence is not None else None,
         }
         measured.append(float(measured_at))
+    if not measured:
+        return None  # no video plays at all: nothing to report
     observation = {"intersectionId": intersection_id, "timestamp": _iso(min(measured)),
                    "source": SOURCE, "traffic": traffic}
     emergency = data.get("emergency") or {}
@@ -183,12 +200,25 @@ def validate_observation(observation):
     traffic = observation.get("traffic")
     if not isinstance(traffic, dict) or set(traffic) != set(DIRECTIONS):
         errors.append("traffic must contain exactly north, south, east and west")
+    elif all(traffic[name] is None for name in DIRECTIONS):
+        errors.append("traffic must contain at least one available approach")
     else:
         for name in DIRECTIONS:
+            if traffic[name] is None:
+                continue  # approach unavailable
             entry = traffic[name] if isinstance(traffic[name], dict) else {}
             for key, limit in LIMITS.items():
                 if not _in_range(entry.get(key), 0, limit):
                     errors.append(f"traffic.{name}.{key} must be a number between 0 and {limit}")
+            classes = entry.get("classes", {})
+            if (not isinstance(classes, dict) or len(classes) > MAX_CLASSES
+                    or not all(isinstance(label, str) and CLASS_PATTERN.match(label)
+                               and isinstance(count, int) and _in_range(count, 0, LIMITS["vehicles"])
+                               for label, count in classes.items())):
+                errors.append(f"traffic.{name}.classes must map class names to vehicle counts")
+            confidence = entry.get("confidence")
+            if confidence is not None and not _in_range(confidence, 0, 1):
+                errors.append(f"traffic.{name}.confidence must be a number between 0 and 1 or null")
     emergency = observation.get("emergency")
     if emergency is not None:
         if not isinstance(emergency, dict) or not isinstance(emergency.get("detected"), bool):

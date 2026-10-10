@@ -26,6 +26,7 @@ _ENV_NAMES = (
     "YOLO_DEVICE", "PIPELINE_RESTART_SECONDS", "LOG_LEVEL",
     "BACKEND_URL", "INTERSECTION_ID", "TRAFFIC_INGEST_TOKEN",
     "BACKEND_PUBLISH_INTERVAL", "BACKEND_TIMEOUT",
+    "VIDEO_SOURCE_MODE", "DETECTION_FRAME_STRIDE",
 )
 
 def _load_environment():
@@ -90,14 +91,16 @@ YOLO_DEVICE = _value("YOLO_DEVICE", "auto")
 
 
 # EDIT VIDEO SOURCES HERE for BOTH main.py and yooFinalMaybe.py.
-# These are the four MP4s selected in the user's desktop script.
-# Nonempty VIDEO_* environment settings override individual entries below.
-videos = [
-    "videos/1car8mins.mp4",       # NORTH
-    "videos/4cars.mp4",          # SOUTH (matches actual filename casing)
-    "videos/5carsgood.mp4",      # WEST
-    "videos/aFewMoreCars.mp4",   # EAST
+# The four videos in videos/, one per direction (same order as `names`).
+# Files mode (the default) loops exactly these four files. In cameras mode,
+# nonempty VIDEO_* environment settings override individual entries below.
+VIDEO_FILES = [
+    "videos/video1.mp4",  # NORTH
+    "videos/video2.mp4",  # SOUTH
+    "videos/video3.mp4",  # WEST
+    "videos/video4.mp4",  # EAST
 ]
+videos = list(VIDEO_FILES)
 
 names = [
     "NORTH",
@@ -108,6 +111,36 @@ names = [
 
 # Empty overrides preserve the shared defaults above.
 videos = [_value(f"VIDEO_{direction}", source) for direction, source in zip(names, videos)]
+
+
+def _source_mode():
+    mode = _value("VIDEO_SOURCE_MODE", "files").lower()
+    if mode in ("files", "cameras"):
+        return mode
+    warnings.warn("Invalid VIDEO_SOURCE_MODE; use files or cameras. Using files.",
+                  RuntimeWarning, stacklevel=2)
+    return "files"
+
+
+def _detection_stride():
+    try:
+        stride = int(_value("DETECTION_FRAME_STRIDE", "2"))
+        if stride >= 1:
+            return stride
+    except ValueError:
+        pass
+    warnings.warn("Invalid DETECTION_FRAME_STRIDE; it must be a whole number of at least 1. "
+                  "Using 2.", RuntimeWarning, stacklevel=2)
+    return 2
+
+
+# "files" (default): VIDEO_FILES above, one per direction, each looping at
+# its own frame rate. "cameras": the `videos` list above with its VIDEO_*
+# overrides (live cameras, streams, YouTube).
+VIDEO_SOURCE_MODE = _source_mode()
+
+# YOLO runs on every Nth processed frame of each stream (2 = the original rate).
+DETECTION_FRAME_STRIDE = _detection_stride()
 
 vehicle_weights = {
     "motorcycle": 0.5,

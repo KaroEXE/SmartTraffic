@@ -26,6 +26,13 @@ def json_safe(value):
 
 
 class SharedState:
+    # A viewer slot whose stream has not pulled a frame for this long belongs
+    # to a connection the HTTP server dropped without closing the response
+    # (Werkzeug's development server does that on disconnect); it is
+    # reclaimed when a new viewer needs a slot. Live viewers pull several
+    # frames per second.
+    STREAM_IDLE_SECONDS = 20.0
+
     def __init__(self, settings):
         self.settings = settings
         self.condition = threading.Condition()
@@ -48,7 +55,9 @@ class SharedState:
         self._encoder_error: str | None = None
         # Status reported by background components (publisher, supervisor, ...).
         self._components: dict[str, dict] = {}
-        self._stream_clients = 0
+        # MJPEG viewer leases: lease id -> monotonic time of its last frame pull.
+        self._stream_leases: dict[int, float] = {}
+        self._next_lease = 0
 
     def start_encoder(self):
         with self.condition:
@@ -70,21 +79,41 @@ class SharedState:
         with self.condition:
             self._components[name] = normalized
 
+    def _reclaim_idle_streams(self, now):
+        idle = [lease for lease, last in self._stream_leases.items()
+                if now - last > self.STREAM_IDLE_SECONDS]
+        for lease in idle:
+            del self._stream_leases[lease]
+
     def acquire_stream(self):
-        """Reserve an MJPEG viewer slot; False when closed or at capacity.
+        """Reserve an MJPEG viewer slot; a lease id, or None when closed or at capacity.
 
         Each stream holds one server thread for its whole lifetime, so the cap
-        keeps threads free for health checks and JSON requests.
+        keeps threads free for health checks and JSON requests. Slots of
+        dropped connections that were never closed are reclaimed first.
         """
         with self.condition:
-            if self._closed or self._stream_clients >= self.settings.max_stream_clients:
-                return False
-            self._stream_clients += 1
-            return True
+            if self._closed:
+                return None
+            now = time.monotonic()
+            if len(self._stream_leases) >= self.settings.max_stream_clients:
+                self._reclaim_idle_streams(now)
+            if len(self._stream_leases) >= self.settings.max_stream_clients:
+                return None
+            self._next_lease += 1
+            self._stream_leases[self._next_lease] = now
+            return self._next_lease
 
-    def release_stream(self):
+    def touch_stream(self, lease):
+        """The stream with this lease pulled a frame: its viewer is still there."""
         with self.condition:
-            self._stream_clients = max(0, self._stream_clients - 1)
+            if lease in self._stream_leases:
+                self._stream_leases[lease] = time.monotonic()
+
+    def release_stream(self, lease):
+        """Frees a viewer slot; releasing the same lease twice does nothing."""
+        with self.condition:
+            self._stream_leases.pop(lease, None)
 
     def camera_status(self, index, status):
         with self.condition:
@@ -133,6 +162,10 @@ class SharedState:
             try:
                 encoded = []
                 for frame in frames:
+                    if frame is None:
+                        # That direction has no source; the other three still update.
+                        encoded.append(None)
+                        continue
                     ok, jpeg_array = cv2.imencode(".jpg", frame,
                                             [cv2.IMWRITE_JPEG_QUALITY, self.settings.jpeg_quality])
                     if not ok:
@@ -147,6 +180,12 @@ class SharedState:
                 if self._closed:
                     return
                 for i, data in enumerate(encoded):
+                    if data is None:
+                        # Unavailable at once, so its viewers end instead of
+                        # replaying the last frame until it goes stale.
+                        self._jpeg[i] = None
+                        self._frame_mono[i] = None
+                        continue
                     self._jpeg[i] = data
                     self._sequences[i] += 1
                     self._frame_mono[i] = captured_mono
@@ -196,13 +235,14 @@ class SharedState:
     def health(self):
         with self.condition:
             now = time.monotonic()
+            self._reclaim_idle_streams(now)
             fresh = self._updated_mono is not None and now - self._updated_mono <= self.settings.stale_seconds
             ready = fresh and all(self._frame_available(i, now) for i in range(4))
             return {"service": "smart-traffic-ai", "ready": ready,
                     "pipeline_status": self._status, "reason": self._reason,
                     "encoder_error": self._encoder_error,
                     "updated_at": self._snapshot["updated_at"] if self._snapshot else None,
-                    "stream_clients": self._stream_clients,
+                    "stream_clients": len(self._stream_leases),
                     "components": copy.deepcopy(self._components)}
 
     def finish_pipeline(self):

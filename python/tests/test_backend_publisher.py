@@ -39,7 +39,8 @@ def snapshot(base=BASE_TIME, emergency=None):
         "schema_version": 1,
         "updated_at": base + 1,
         "directions": {
-            "north": measured(12, 8, 15.04, base + 0.5),
+            "north": {**measured(12, 8, 15.04, base + 0.5),
+                      "class_counts": {"car": 10, "bus": 2}, "average_confidence": 0.71234},
             "south": measured(4, 3, 7.0, base + 0.25),  # oldest measurement
             "west": measured(5, 4, 10.0, base + 0.75),
             "east": measured(20, 15, 4000.0, base + 0.5),  # above the backend maximum
@@ -109,13 +110,33 @@ class ObservationTests(unittest.TestCase):
             "timestamp": "2025-10-09T08:53:20.250Z",
             "source": "python-ai",
             "traffic": {
-                "north": {"vehicles": 12, "queueLength": 8, "waitingTime": 15.0},
-                "south": {"vehicles": 4, "queueLength": 3, "waitingTime": 7.0},
-                "east": {"vehicles": 20, "queueLength": 15, "waitingTime": 3600},
-                "west": {"vehicles": 5, "queueLength": 4, "waitingTime": 10.0},
+                "north": {"vehicles": 12, "queueLength": 8, "waitingTime": 15.0,
+                          "classes": {"bus": 2, "car": 10}, "confidence": 0.712},
+                "south": {"vehicles": 4, "queueLength": 3, "waitingTime": 7.0,
+                          "classes": {}, "confidence": None},
+                "east": {"vehicles": 20, "queueLength": 15, "waitingTime": 3600,
+                         "classes": {}, "confidence": None},
+                "west": {"vehicles": 5, "queueLength": 4, "waitingTime": 10.0,
+                         "classes": {}, "confidence": None},
             },
         })
         self.assertEqual(validate_observation(observation), [])
+
+    def test_an_approach_without_its_video_is_sent_as_unavailable_not_zero(self):
+        data = snapshot()
+        data["directions"]["west"] = {"source_available": False}
+        observation = build_observation({"available": True, "data": data}, "main")
+        self.assertIsNone(observation["traffic"]["west"])
+        self.assertEqual(observation["traffic"]["north"]["vehicles"], 12)
+        self.assertEqual(validate_observation(observation), [])
+        # A video that plays but has not been measured yet still holds everything back.
+        data["directions"]["south"]["measured_at"] = None
+        self.assertIsNone(build_observation({"available": True, "data": data}, "main"))
+        # No video at all: nothing to send.
+        nothing = snapshot()
+        for name in nothing["directions"]:
+            nothing["directions"][name] = {"source_available": False}
+        self.assertIsNone(build_observation({"available": True, "data": nothing}, "main"))
 
     def test_nothing_is_built_until_every_approach_has_a_fresh_measurement(self):
         self.assertIsNone(build_observation({"available": False, "data": snapshot()}, "main"))
@@ -159,6 +180,10 @@ class ObservationTests(unittest.TestCase):
             (approach(vehicles=-1), "traffic.north.vehicles"),
             (approach(queueLength=True), "traffic.north.queueLength"),
             (approach(waitingTime=float("nan")), "traffic.north.waitingTime"),
+            (approach(classes={"Car!": 1}), "traffic.north.classes"),
+            (approach(classes={"car": -1}), "traffic.north.classes"),
+            (approach(confidence=1.2), "traffic.north.confidence"),
+            (changed(traffic=dict.fromkeys(good["traffic"])), "at least one available approach"),
             (changed(emergency={"detected": True, "type": None, "direction": "north",
                                 "confidence": 0.9}), "emergency.type"),
             (changed(emergency={"detected": True, "type": "emergency", "direction": "north",

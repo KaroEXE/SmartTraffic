@@ -26,6 +26,8 @@ class MainLifecycleTests(unittest.TestCase):
             camera.read.side_effect = [
                 (True, self.frame), (True, self.frame), (False, None),
             ]
+        # These tests cover the camera source path (VIDEO_SOURCE_MODE=cameras).
+        self.contexts.enter_context(mock.patch.object(app, "VIDEO_SOURCE_MODE", "cameras"))
         self.contexts.enter_context(mock.patch.object(app, "videos", ["test"] * 4))
         self.open_video = self.contexts.enter_context(mock.patch.object(
             app, "open_video", side_effect=self.cameras))

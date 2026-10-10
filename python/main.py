@@ -36,6 +36,14 @@ def describe_inputs():
     return rows
 
 
+def describe_video_files():
+    """Files mode: the looping video for each direction and whether it exists."""
+    from config.config import VIDEO_FILES, names, project_path
+
+    return [f"{direction}: looping file {source} ({'found' if project_path(source).is_file() else 'MISSING'})"
+            for direction, source in zip(names, VIDEO_FILES)]
+
+
 def describe_backend(settings):
     """Where observations go; the ingest token itself is never printed."""
     if not settings.enabled:
@@ -61,8 +69,15 @@ def main():
     parser.add_argument("--check-config", action="store_true",
                         help="Print effective input selection without starting cameras, YOLO or HTTP")
     args = parser.parse_args()
-    print("Video sources: config/config.py (nonempty VIDEO_* environment values override it)")
-    for description in describe_inputs():
+    from config.config import VIDEO_SOURCE_MODE
+
+    if VIDEO_SOURCE_MODE == "files":
+        print("Video sources: config/config.py, VIDEO_SOURCE_MODE=files (one looping video per direction)")
+        descriptions = describe_video_files()
+    else:
+        print("Video sources: config/config.py (nonempty VIDEO_* environment values override it)")
+        descriptions = describe_inputs()
+    for description in descriptions:
         print(f"  {description}")
     backend_settings = BackendSettings.from_env()
     print(describe_backend(backend_settings))

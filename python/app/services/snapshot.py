@@ -20,12 +20,18 @@ def build_snapshot(values):
         if phase == "GREEN" and policy.green_road == current:
             remaining = max(0.0, settings.max_priority_seconds - (now - policy.green_since))
 
+    files_mode = values.get("files_mode", False)
+    cameras = values.get("cameras") or [None] * 4
     directions = {}
     for i, name in enumerate(names):
         measurement = values["measurements"][i]
         status, boxes = policy.display(i, now)
+        # Files mode: False while this direction's video is missing or unreadable.
+        source_available = cameras[i] is not None if files_mode else True
         directions[name] = {
             **(measurement or {}),
+            "source_available": source_available,
+            "loops": cameras[i].loops if files_mode and cameras[i] is not None else None,
             "stopped_vehicles": values["stopped_counts"][i] if measurement else None,
             "stopped_score": values["stopped_scores"][i] if measurement else None,
             "priority_score": (values["stopped_scores"][i]
