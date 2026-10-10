@@ -26,7 +26,7 @@ const MAX_EVENTS = 150;
 const EXTENSION_SECONDS = 5;
 const EXTEND_IF_SCORE_RATIO = 1.25;
 
-const TYPE_LABEL = { ambulance: 'AMBULANCE', police: 'POLICE', fire_truck: 'FIRE TRUCK' };
+const TYPE_LABEL = { ambulance: 'AMBULANCE', police: 'POLICE', fire_truck: 'FIRE TRUCK', emergency: 'EMERGENCY VEHICLE' };
 
 const up = (dir) => (dir ? dir.toUpperCase() : '-');
 const pct = (confidence) => `${Math.round(confidence * 100)}%`;
@@ -41,25 +41,48 @@ function perDirection(fn) {
 
 const nonNegative = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
 
+const isCountMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+/** An approach the producer has no source for (e.g. its video is missing). */
+const unavailableApproach = () => ({
+  vehicles: 0, queueLength: 0, waiting: 0, waitingTime: 0, available: false, classes: null, confidence: null,
+});
+
 /**
  * Defensive copy of one traffic observation. The REST validator already
  * guarantees the shape, but the engine may also be fed directly (e.g. by a
  * traffic-state store), so missing or non-numeric values become 0 rather
  * than NaN. Waiting time is accepted as `waiting` or `waitingTime` and is
- * exposed under both names.
+ * exposed under both names. A null approach is unavailable: it adds no
+ * demand here and is published as unavailable (null counts), never as zero.
  */
 function normalizeObservation(data) {
   const traffic = perDirection((d) => {
-    const e = (data.traffic && data.traffic[d]) || {};
+    const raw = data.traffic ? data.traffic[d] : undefined;
+    if (raw === null) return unavailableApproach();
+    const e = raw || {};
     const waiting = nonNegative(e.waiting !== undefined ? e.waiting : e.waitingTime);
-    return { vehicles: nonNegative(e.vehicles), queueLength: nonNegative(e.queueLength), waiting, waitingTime: waiting };
+    return {
+      vehicles: nonNegative(e.vehicles),
+      queueLength: nonNegative(e.queueLength),
+      waiting,
+      waitingTime: waiting,
+      available: true,
+      classes: isCountMap(e.classes) ? { ...e.classes } : null,
+      confidence: typeof e.confidence === 'number' && Number.isFinite(e.confidence) ? e.confidence : null,
+    };
   });
   const pedestrians = perDirection((d) => Boolean(data.pedestrians) && data.pedestrians[d] === true);
+  // Which detectors reported (POST /api/traffic sets this; a direct caller is
+  // taken to report what it sent).
+  const detectors = data.detectors
+    ? { pedestrians: data.detectors.pedestrians === true, emergency: data.detectors.emergency === true }
+    : { pedestrians: data.pedestrians !== undefined, emergency: data.emergency !== undefined };
   const em = data.emergency || {};
   const emergency = em.detected === true && DIRECTIONS.includes(em.direction)
     ? { detected: true, type: em.type || null, direction: em.direction, confidence: Math.min(1, nonNegative(em.confidence)) }
     : { detected: false, type: null, direction: null, confidence: 0 };
-  return { traffic, pedestrians, emergency };
+  return { traffic, pedestrians, emergency, detectors };
 }
 
 class TrafficDecisionService extends EventEmitter {
@@ -140,23 +163,11 @@ class TrafficDecisionService extends EventEmitter {
     if (!s) return null;
     const now = this.now();
 
-    // Development mock data never overrides a live perception feed.
-    if (data.source === 'mock') {
-      if (s.lastRealDataAt && now - s.lastRealDataAt <= this.config.timing.DATA_TIMEOUT * 1000) {
-        if (!s.mockIgnoredLogged) {
-          s.mockIgnoredLogged = true;
-          this._log(s, 'AI DATA', 'Live perception feed active - mock data ignored', 'warning');
-        }
-        return { ...this._snapshot(s), ignored: 'mock' };
-      }
-    } else {
-      s.lastRealDataAt = now;
-      s.mockIgnoredLogged = false;
-    }
-
     const obs = normalizeObservation(data);
+    this._logAvailability(s, obs.traffic);
     s.traffic = obs.traffic;
     s.pedestrians = obs.pedestrians;
+    s.detectors = obs.detectors;
     s.detection = obs.emergency;
     s.scores = perDirection((d) => this.priorityScore(obs.traffic[d]));
     s.lastDataAt = now;
@@ -212,8 +223,11 @@ class TrafficDecisionService extends EventEmitter {
       lat: def.lat,
       lng: def.lng,
 
-      traffic: perDirection(() => ({ vehicles: 0, queueLength: 0, waiting: 0, waitingTime: 0 })),
+      // Nothing measured yet: no demand. Published as null counts until the
+      // first observation arrives (see _publicTraffic).
+      traffic: perDirection(() => unavailableApproach()),
       pedestrians: perDirection(() => false),
+      detectors: { pedestrians: false, emergency: false },
       scores: perDirection(() => 0),
       detection: { detected: false, type: null, direction: null, confidence: 0 },
       emergency: { active: false, type: null, direction: null, confidence: 0, since: null, suppressed: false, lastSeen: 0 },
@@ -235,8 +249,6 @@ class TrafficDecisionService extends EventEmitter {
       walkCrosswalks: [],
       pedRequestedAt: perDirection(() => null),
       pedLastSeen: perDirection(() => 0),
-      lastRealDataAt: null,
-      mockIgnoredLogged: false,
       pedCooldownUntil: 0,
       redSince: perDirection((d) => (d === 'north' ? null : now)),
 
@@ -310,8 +322,13 @@ class TrafficDecisionService extends EventEmitter {
       holding: s.holding,
       reason: s.reason,
 
-      traffic: s.traffic,
+      // Per approach: counts, or null counts with available=false when the
+      // approach has no source or nothing was received yet.
+      traffic: this._publicTraffic(s),
       pedestrians: { ...s.pedestrians },
+      // Which detectors the AI service runs. False = not measured (the
+      // matching fields above are not "none detected").
+      detectors: { ...s.detectors },
       pedestrianRequests: perDirection((d) => s.pedRequestedAt[d] !== null),
       scores: { ...s.scores },
       redSeconds: perDirection((d) => (s.redSince[d] ? Math.round((now - s.redSince[d]) / 1000) : 0)),
@@ -357,7 +374,27 @@ class TrafficDecisionService extends EventEmitter {
     this.emit('signalUpdate', this._snapshot(s));
   }
 
+  _publicTraffic(s) {
+    return perDirection((d) => {
+      const t = s.traffic[d];
+      if (!t.available || !s.updatesReceived) {
+        return { vehicles: null, queueLength: null, waiting: null, waitingTime: null, available: false, classes: null, confidence: null };
+      }
+      return { ...t, classes: t.classes ? { ...t.classes } : null };
+    });
+  }
+
   // ------------------------------------------------------------ data inputs
+
+  /** Logs approaches that lose or regain their source (e.g. a missing camera video). */
+  _logAvailability(s, traffic) {
+    for (const d of DIRECTIONS) {
+      const was = s.updatesReceived ? s.traffic[d].available : true;
+      const now = traffic[d].available;
+      if (was && !now) this._log(s, 'AI DATA', `${up(d)} camera unavailable - no detections for this approach`, 'warning');
+      else if (!was && now && s.updatesReceived) this._log(s, 'AI DATA', `${up(d)} camera available again`);
+    }
+  }
 
   _trackDemand(s, now) {
     for (const d of DIRECTIONS) {
@@ -713,7 +750,9 @@ class TrafficDecisionService extends EventEmitter {
     for (const d of DIRECTIONS) {
       if (d === exclude || !s.redSince[d]) continue;
       const t = s.traffic[d];
-      if (t.vehicles === 0 && t.queueLength === 0) continue;
+      // An approach without a camera cannot show its demand, so it is still
+      // served after the maximum red time (detector-failure recall).
+      if (t.available && t.vehicles === 0 && t.queueLength === 0) continue;
       const seconds = Math.round((now - s.redSince[d]) / 1000);
       if (seconds >= limit && (!worst || seconds > worst.seconds)) worst = { direction: d, seconds };
     }

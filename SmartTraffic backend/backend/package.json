@@ -2,12 +2,11 @@
   "name": "smart-traffic-ai-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "Smart Traffic AI - adaptive signal decision engine, REST API and Socket.IO hub (simulation prototype)",
+  "description": "Smart Traffic AI - adaptive signal decision engine, REST API and Socket.IO hub",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "mock": "node ../mock/mockClient.js",
     "test": "node --test"
   },
   "engines": {

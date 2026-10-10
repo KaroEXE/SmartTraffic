@@ -145,7 +145,10 @@ class TrafficHistoryService {
       timestamp: new Date(state.timestamp || state.receivedAt),
       receivedAt: new Date(state.receivedAt),
       source: state.source,
-      traffic: state.traffic,
+      // The stored counts per approach; null = that approach had no source.
+      traffic: Object.fromEntries(Object.entries(state.traffic).map(([dir, t]) => [dir, t
+        ? { vehicles: t.vehicles, queueLength: t.queueLength, waitingTime: t.waitingTime }
+        : null])),
       pedestrians: state.pedestrians,
       emergency: state.emergency,
       signal: {

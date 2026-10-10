@@ -11,7 +11,9 @@
  */
 
 const DIRECTIONS = ['north', 'south', 'east', 'west'];
-const EMERGENCY_TYPES = ['ambulance', 'police', 'fire_truck'];
+// "emergency": an emergency vehicle whose service is unknown (the AI service's
+// Roboflow workflow detects one class, "emergency-car").
+const EMERGENCY_TYPES = ['ambulance', 'police', 'fire_truck', 'emergency'];
 
 const EMERGENCY_TYPE_ALIASES = {
   ambulance: 'ambulance',
@@ -21,6 +23,9 @@ const EMERGENCY_TYPE_ALIASES = {
   firetruck: 'fire_truck',
   fire: 'fire_truck',
   fire_engine: 'fire_truck',
+  emergency: 'emergency',
+  emergency_car: 'emergency',
+  emergency_vehicle: 'emergency',
 };
 
 // Sanity caps: values above these are almost certainly a bug upstream.
@@ -31,6 +36,9 @@ const LIMITS = {
 };
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+// Optional per-approach detections by object class, e.g. { car: 5, bus: 1 }.
+const CLASS_PATTERN = /^[a-z][a-z ]{0,31}$/;
+const MAX_CLASSES = 16;
 const FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 
 function isPlainObject(value) {
@@ -57,6 +65,31 @@ function unknownKeys(object, allowed) {
   return Object.keys(object).filter((k) => !allowed.includes(k));
 }
 
+function validateClasses(errors, path, classes) {
+  if (isMissing(classes)) return null;
+  const entries = isPlainObject(classes) ? Object.entries(classes) : null;
+  if (!entries || entries.length > MAX_CLASSES || !entries.every(([name, count]) => CLASS_PATTERN.test(name)
+    && Number.isInteger(count) && count >= 0 && count <= LIMITS.vehicles)) {
+    errors.push(`${path} must map up to ${MAX_CLASSES} lowercase class names to vehicle counts`);
+    return null;
+  }
+  return Object.fromEntries(entries);
+}
+
+function validateConfidence(errors, path, value) {
+  if (isMissing(value)) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+    errors.push(`${path} must be a number between 0 and 1 or null`);
+    return null;
+  }
+  return value;
+}
+
+/**
+ * Each approach is an object, or null when the producer has no source for it
+ * (e.g. its camera video is missing). A null approach is kept as null: it is
+ * shown as unavailable, never as zero traffic. At least one must be present.
+ */
 function validateTraffic(errors, traffic) {
   const out = {};
   if (!isPlainObject(traffic)) {
@@ -66,10 +99,18 @@ function validateTraffic(errors, traffic) {
   for (const key of unknownKeys(traffic, DIRECTIONS)) {
     errors.push(`traffic.${key} is not a valid direction (use ${DIRECTIONS.join(', ')})`);
   }
+  if (DIRECTIONS.every((dir) => traffic[dir] === null)) {
+    errors.push('traffic must contain at least one available approach');
+    return out;
+  }
   for (const dir of DIRECTIONS) {
     const entry = traffic[dir];
+    if (entry === null) {
+      out[dir] = null;
+      continue;
+    }
     if (!isPlainObject(entry)) {
-      errors.push(`traffic.${dir} is required and must be an object`);
+      errors.push(`traffic.${dir} is required and must be an object (or null when unavailable)`);
       continue;
     }
     // `waitingTime` is the contract name; `waiting` is accepted for older producers.
@@ -77,11 +118,15 @@ function validateTraffic(errors, traffic) {
     const okV = checkNonNegative(errors, `traffic.${dir}.vehicles`, entry.vehicles, LIMITS.vehicles);
     const okQ = checkNonNegative(errors, `traffic.${dir}.queueLength`, entry.queueLength, LIMITS.queueLength);
     const okW = checkNonNegative(errors, `traffic.${dir}.${waitingKey}`, entry[waitingKey], LIMITS.waitingTime);
+    const classes = validateClasses(errors, `traffic.${dir}.classes`, entry.classes);
+    const confidence = validateConfidence(errors, `traffic.${dir}.confidence`, entry.confidence);
     if (okV && okQ && okW) {
       out[dir] = {
         vehicles: entry.vehicles,
         queueLength: entry.queueLength,
         waitingTime: Math.round(entry[waitingKey] * 10) / 10,
+        classes,
+        confidence,
       };
     }
   }
@@ -192,10 +237,14 @@ function validateObservation(body) {
   const emergency = validateEmergency(errors, warnings, body.emergency);
 
   if (errors.length) return { ok: false, errors };
+  // Which detectors the producer actually ran. An omitted `pedestrians` or
+  // `emergency` means "not measured", which the dashboard must not show as
+  // "none detected".
+  const detectors = { pedestrians: !isMissing(body.pedestrians), emergency: !isMissing(body.emergency) };
   return {
     ok: true,
     warnings,
-    value: { intersectionId, timestamp, source, traffic, pedestrians, emergency },
+    value: { intersectionId, timestamp, source, traffic, pedestrians, emergency, detectors },
   };
 }
 
@@ -208,7 +257,9 @@ function toDecisionInput(observation) {
   const traffic = {};
   for (const dir of DIRECTIONS) {
     const t = observation.traffic[dir];
-    traffic[dir] = { vehicles: t.vehicles, waiting: t.waitingTime, queueLength: t.queueLength };
+    traffic[dir] = t === null
+      ? null
+      : { vehicles: t.vehicles, waiting: t.waitingTime, queueLength: t.queueLength, classes: t.classes, confidence: t.confidence };
   }
   const em = observation.emergency;
   const actionable = em.detected && em.direction !== null;
@@ -218,6 +269,7 @@ function toDecisionInput(observation) {
     source: observation.source,
     traffic,
     pedestrians: { ...observation.pedestrians },
+    detectors: { ...observation.detectors },
     emergency: actionable
       ? { ...em }
       : { detected: false, type: null, direction: null, confidence: 0 },

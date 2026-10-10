@@ -124,7 +124,9 @@ test('Test 1 - normal traffic: east has the highest demand and gets green', () =
   assert.match(snap.signal.reason, /EAST has the highest traffic demand/);
   assert.deepEqual(snap.signals, { north: 'RED', south: 'RED', east: 'GREEN', west: 'RED' });
   // Original observations are preserved.
-  assert.deepEqual(snap.traffic.east, { vehicles: 20, queueLength: 15, waiting: 22, waitingTime: 22 });
+  assert.deepEqual(snap.traffic.east, {
+    vehicles: 20, queueLength: 15, waiting: 22, waitingTime: 22, available: true, classes: null, confidence: null,
+  });
   assertValidState(snap);
 });
 

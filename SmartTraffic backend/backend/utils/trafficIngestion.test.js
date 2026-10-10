@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const express = require('express');
 
 const config = require('../config');
-const intersections = require('../config/intersections');
+const simulationIntersections = require('../config/simulationIntersections');
 const { createTrafficDecisionService } = require('../services/trafficDecisionService');
 const { createTrafficStateService } = require('../services/trafficStateService');
 const { createTrafficController } = require('../controllers/trafficController');
@@ -14,22 +14,33 @@ const { createSimulationController } = require('../controllers/simulationControl
 const { createTrafficRoutes, createSimulationRoutes } = require('../routes/trafficRoutes');
 const { createSimulationService } = require('../services/simulationService');
 const { validateObservation } = require('./validation');
-const SAMPLE = require('./sampleTraffic.json');
+const SAMPLE = require('../test/fixtures/sampleTraffic.json');
 
+// Two live intersections, so per-intersection storage can be tested; the
+// server itself manages only the one in config/intersections.js.
+const intersections = [
+  { id: 'main', name: 'Main', lat: 0, lng: 0 },
+  { id: 'second', name: 'Second', lat: 0, lng: 0 },
+];
 const sample = (overrides = {}) => ({ ...structuredClone(SAMPLE), timestamp: new Date().toISOString(), ...overrides });
+// What the store keeps per approach: the fixture's values plus the optional fields.
+const stored = (traffic) => Object.fromEntries(Object.entries(traffic)
+  .map(([d, t]) => [d, t && { classes: null, confidence: null, ...t }]));
 
 /** Mounted like server.js: /api/simulation (simulation channel) and /api (live channel). */
-async function startApp({ history = null } = {}) {
+async function startApp({ history = null, ingestToken = '' } = {}) {
   const engine = createTrafficDecisionService({ intersections, config });
   const stateService = createTrafficStateService();
-  const simulation = createSimulationService({ intersections, config, generatorTickMs: 1e9, engineTickMs: 1e9 });
+  const simulation = createSimulationService({
+    intersections: simulationIntersections, config, generatorTickMs: 1e9, engineTickMs: 1e9,
+  });
   const app = express();
   app.use(express.json({ limit: '100kb' }));
   app.use('/api/simulation', createSimulationRoutes(
     createTrafficController(simulation.engine, { stateService: simulation.stateService }),
     createSimulationController(simulation),
   ));
-  app.use('/api', createTrafficRoutes(createTrafficController(engine, { stateService, history })));
+  app.use('/api', createTrafficRoutes(createTrafficController(engine, { stateService, history, ingestToken })));
   app.use('/api', (req, res) => res.status(404).json({ ok: false, error: `No route ${req.method} ${req.originalUrl}` }));
   // Same JSON error handling as server.js
   // eslint-disable-next-line no-unused-vars
@@ -67,7 +78,7 @@ test('1. valid traffic data is stored and returned by GET', async () => {
 
     const got = await app.get('/traffic/observations/main');
     assert.equal(got.status, 200);
-    assert.deepEqual(got.body.observation.traffic, SAMPLE.traffic);
+    assert.deepEqual(got.body.observation.traffic, stored(SAMPLE.traffic));
     assert.equal(got.body.observation.timestamp, payload.timestamp);
     assert.equal(got.body.observation.intersectionId, 'main');
 
@@ -173,17 +184,21 @@ test('5. multiple intersections are stored independently', async () => {
   const app = await startApp();
   try {
     await app.post(sample({ intersectionId: 'main' }));
-    const uni = sample({ intersectionId: 'university-road', emergency: null });
-    uni.traffic.east.vehicles = 3;
-    await app.post(uni);
+    const second = sample({ intersectionId: 'second', emergency: null });
+    second.traffic.east.vehicles = 3;
+    await app.post(second);
 
     const all = (await app.get('/traffic/observations')).body.observations;
-    assert.deepEqual(all.map((o) => o.intersectionId).sort(), ['main', 'university-road']);
+    assert.deepEqual(all.map((o) => o.intersectionId).sort(), ['main', 'second']);
     assert.equal((await app.get('/traffic/observations/main')).body.observation.traffic.east.vehicles, 20);
-    assert.equal((await app.get('/traffic/observations/university-road')).body.observation.traffic.east.vehicles, 3);
-    assert.equal((await app.get('/traffic/observations/university-road')).body.observation.emergency.detected, false);
-    assert.equal((await app.get('/traffic/observations/market-square')).status, 404, 'no data -> nothing invented');
+    assert.equal((await app.get('/traffic/observations/second')).body.observation.traffic.east.vehicles, 3);
+    assert.equal((await app.get('/traffic/observations/second')).body.observation.emergency.detected, false);
   } finally { await app.close(); }
+
+  const fresh = await startApp();
+  try {
+    assert.equal((await fresh.get('/traffic/observations/second')).status, 404, 'no data -> nothing invented');
+  } finally { await fresh.close(); }
 });
 
 test('6. repeated updates replace the state (no duplicates); stale ones are rejected', async () => {
@@ -356,4 +371,69 @@ test('history API: one mode per query, validated parameters, safe without a data
     assert.equal(res.status, 503);
     assert.match(res.body.error, /not configured/);
   } finally { await noDb.close(); }
+});
+
+// ------------------------------------------------- AI service contract
+
+test('an approach without a camera video is accepted as unavailable, never as zero', async () => {
+  const app = await startApp();
+  try {
+    const payload = sample({ emergency: undefined, pedestrians: undefined });
+    payload.traffic.west = null;
+    payload.traffic.north = { ...payload.traffic.north, classes: { car: 10, bus: 2 }, confidence: 0.71 };
+    const res = await app.post(payload);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+
+    const obs = (await app.get('/traffic/observations/main')).body.observation;
+    assert.equal(obs.traffic.west, null);
+    assert.deepEqual(obs.traffic.north.classes, { car: 10, bus: 2 });
+    assert.equal(obs.traffic.north.confidence, 0.71);
+    assert.deepEqual(obs.detectors, { pedestrians: false, emergency: false }, 'omitted detectors are "not measured"');
+
+    const state = (await app.get('/traffic/state/main')).body.state;
+    assert.deepEqual(state.traffic.west, {
+      vehicles: null, queueLength: null, waiting: null, waitingTime: null, available: false, classes: null, confidence: null,
+    });
+    assert.equal(state.traffic.north.available, true);
+    assert.equal(state.traffic.north.vehicles, 12);
+    assert.deepEqual(state.traffic.north.classes, { car: 10, bus: 2 });
+    assert.deepEqual(state.detectors, { pedestrians: false, emergency: false });
+    assert.ok(state.events.some((e) => /WEST camera unavailable/.test(e.message)));
+
+    const allMissing = sample();
+    for (const d of Object.keys(allMissing.traffic)) allMissing.traffic[d] = null;
+    const rejected = await app.post(allMissing);
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.body.details.join(' | '), /at least one available approach/);
+
+    for (const [field, value] of [['classes', { Car: 1 }], ['classes', { car: -1 }], ['classes', [1]], ['confidence', 2]]) {
+      const bad = sample();
+      bad.traffic.north[field] = value;
+      assert.equal((await app.post(bad)).status, 400, `${field}=${JSON.stringify(value)}`);
+    }
+  } finally { await app.close(); }
+});
+
+test('the AI service generic "emergency" type is accepted', async () => {
+  const app = await startApp();
+  try {
+    const res = await app.post(sample({ emergency: { detected: true, type: 'emergency', direction: 'west', confidence: 0.85 } }));
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.decision.mode, 'EMERGENCY');
+  } finally { await app.close(); }
+});
+
+test('with TRAFFIC_INGEST_TOKEN set, only the AI service can post traffic', async () => {
+  const app = await startApp({ ingestToken: 'shared-secret' });
+  try {
+    const json = { 'Content-Type': 'application/json' };
+    const missing = await app.post(sample());
+    assert.equal(missing.status, 401);
+    const wrong = await app.post(sample(), { ...json, Authorization: 'Bearer nope' });
+    assert.equal(wrong.status, 401);
+    assert.equal(app.stateService.getAllTrafficStates().length, 0, 'nothing stored from unauthorized requests');
+    const right = await app.post(sample(), { ...json, Authorization: 'Bearer shared-secret' });
+    assert.equal(right.status, 200);
+    assert.equal((await app.get('/health')).body.ingestion.tokenRequired, true);
+  } finally { await app.close(); }
 });

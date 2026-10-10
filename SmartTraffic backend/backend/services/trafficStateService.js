@@ -18,15 +18,17 @@ const EventEmitter = require('events');
  *     intersectionId, timestamp,        // timestamp = producer's capture time (ISO) or null
  *     receivedAt,                       // server receive time (ISO)
  *     sequence,                         // accepted updates for this intersection
- *     source,                           // optional producer tag, e.g. "mock"
- *     traffic: { north: { vehicles, queueLength, waitingTime }, south, east, west },
+ *     source,                           // optional producer tag, e.g. "python-ai"
+ *     traffic: { north: { vehicles, queueLength, waitingTime, classes, confidence } | null, south, east, west },
+ *                                       // null = the producer has no source for that approach
  *     pedestrians: { north, south, east, west },   // booleans
- *     emergency: { detected, type, direction, confidence }
+ *     emergency: { detected, type, direction, confidence },
+ *     detectors: { pedestrians, emergency }        // which detectors reported
  *   }
  */
 
-// A live (non-mock) feed that posted within this window has priority over mock data.
-const LIVE_PRIORITY_WINDOW_MS = 10_000;
+// Out-of-order protection only applies while the stored observation is this recent.
+const RECENT_WINDOW_MS = 10_000;
 // Hard cap on stored intersections (input is validated upstream; this is a backstop).
 const MAX_INTERSECTIONS = 500;
 
@@ -43,8 +45,7 @@ class TrafficStateService extends EventEmitter {
   /**
    * Stores a validated observation as the latest state of its intersection.
    * Returns { stored: true, state } or { stored: false, reason, state } where
-   * reason is 'stale' (older than the stored observation), 'live-feed-active'
-   * (mock data while a live feed is active) or 'capacity'.
+   * reason is 'stale' (older than the stored observation) or 'capacity'.
    */
   setTrafficState(observation) {
     const id = observation.intersectionId;
@@ -56,12 +57,7 @@ class TrafficStateService extends EventEmitter {
     }
 
     if (current) {
-      const recentlyUpdated = now - current._receivedMs <= LIVE_PRIORITY_WINDOW_MS;
-
-      // Development data never replaces a live feed that is still posting.
-      if (observation.source === 'mock' && current.source !== 'mock' && recentlyUpdated) {
-        return { stored: false, reason: 'live-feed-active', state: this.getTrafficState(id) };
-      }
+      const recentlyUpdated = now - current._receivedMs <= RECENT_WINDOW_MS;
 
       // HTTP requests can arrive out of order; keep the newest capture.
       // (Only while the stored one is recent, so a producer clock reset
@@ -81,6 +77,7 @@ class TrafficStateService extends EventEmitter {
       traffic: clone(observation.traffic),
       pedestrians: clone(observation.pedestrians),
       emergency: clone(observation.emergency),
+      detectors: clone(observation.detectors || { pedestrians: false, emergency: false }),
     };
     // Replaces the previous entry: one state per intersection, never duplicates.
     this.states.set(id, { ...state, _receivedMs: now });

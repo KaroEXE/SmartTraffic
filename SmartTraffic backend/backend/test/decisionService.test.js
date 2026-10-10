@@ -211,19 +211,6 @@ test('a flickering pedestrian detection is still served', () => {
   assert.equal(requests, 1, 'one request, not one per flicker');
 });
 
-test('mock data is ignored while a live perception feed is active', () => {
-  const { svc, advance } = setup();
-  const live = payload({ traffic: { east: { vehicles: 30, waiting: 5, queueLength: 20 } } });
-  svc.ingest(live);
-  const mock = { ...payload({ traffic: { east: { vehicles: 0, waiting: 0, queueLength: 0 } } }), source: 'mock' };
-  const result = svc.ingest(mock);
-  assert.equal(result.ignored, 'mock');
-  assert.equal(svc.getSnapshot('main').traffic.east.vehicles, 30);
-  advance(12); // live feed gone -> mock accepted again
-  assert.equal(svc.ingest(mock).ignored, undefined);
-  assert.equal(svc.getSnapshot('main').traffic.east.vehicles, 0);
-});
-
 test('low-confidence emergency detections are ignored', () => {
   const { svc } = setup();
   svc.ingest(payload({ emergency: { detected: true, type: 'police', direction: 'east', confidence: 0.6 } }));

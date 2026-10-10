@@ -5,6 +5,7 @@ const cors = require('cors');
 
 const config = require('./config');
 const intersections = require('./config/intersections');
+const simulationIntersections = require('./config/simulationIntersections');
 const { connectDatabase, disconnectDatabase, getDatabaseStatus } = require('./config/database');
 const { createTrafficDecisionService } = require('./services/trafficDecisionService');
 const { trafficStateService } = require('./services/trafficStateService');
@@ -25,12 +26,15 @@ function packageDir(name) {
 const app = express();
 const server = http.createServer(app);
 
-// LIVE channel: real perception data -> trafficStateService -> `service`.
+// LIVE channel: AI observations (POST /api/traffic) -> trafficStateService
+// -> decision engine `service` -> Socket.IO room "live". Only real data.
 const service = createTrafficDecisionService({ intersections, config });
 
-// SIMULATION channel: its own engine and store, idle until started from the
-// dashboard. Shares nothing with the live objects above.
-const simulation = createSimulationService({ intersections, config });
+// SIMULATION channel (the dashboard's Simulation tab): its own generator,
+// engine, store and intersection list, idle until started from the
+// dashboard. Shares nothing with the live objects above, and nothing it
+// produces can reach them.
+const simulation = createSimulationService({ intersections: simulationIntersections, config });
 
 // Historical data (MongoDB). Signal control does not depend on it. One
 // instance per channel; each stamps its own dataMode on what it writes.
@@ -52,8 +56,12 @@ const controller = createTrafficController(service, {
     ...(history ? history.stats() : {}),
     ...(simulationHistory ? { simulation: simulationHistory.stats() } : {}),
   }),
+  ingestToken: config.trafficIngestToken,
 });
 const simulationReadController = createTrafficController(simulation.engine, { stateService: simulation.stateService });
+if (!config.trafficIngestToken) {
+  console.warn('[server] TRAFFIC_INGEST_TOKEN is not set: anyone who can reach POST /api/traffic can post traffic data. Set it (and the same value on the AI service) in production.');
+}
 
 app.use(cors({ origin: config.corsOrigin }));
 app.use(express.json({ limit: '100kb' }));
@@ -100,7 +108,7 @@ server.on('error', (err) => {
 
 server.listen(config.port, () => {
   console.log('');
-  console.log('  Smart Traffic AI - control backend (simulation prototype)');
+  console.log('  Smart Traffic AI - control backend');
   console.log(`  Swagger     http://localhost:${config.port}/api/docs/`);
   console.log(`  Dashboard   http://localhost:${config.port}`);
   console.log(`  API         http://localhost:${config.port}/api/health`);

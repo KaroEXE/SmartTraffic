@@ -24,6 +24,11 @@ const approachProperties = {
   vehicles: { type: 'number', minimum: 0, maximum: LIMITS.vehicles, description: 'Vehicles visible on the approach.' },
   queueLength: { type: 'number', minimum: 0, maximum: LIMITS.queueLength, description: 'Vehicles stopped in the queue.' },
   waitingTime: { type: 'number', minimum: 0, maximum: LIMITS.waitingTime, description: 'Average wait in seconds; normalized to one decimal place.' },
+  classes: {
+    type: 'object', nullable: true, additionalProperties: { type: 'integer', minimum: 0, maximum: LIMITS.vehicles },
+    description: 'Optional. Vehicles per detected object class, e.g. {"car": 5, "bus": 1}. Lowercase names, at most 16.',
+  },
+  confidence: { type: 'number', minimum: 0, maximum: 1, nullable: true, description: 'Optional mean detection confidence.' },
 };
 const trafficExample = {
   intersectionId: intersections[0].id,
@@ -52,8 +57,12 @@ const schemas = {
     anyOf: [{ required: ['waitingTime'] }, { required: ['waiting'] }],
   },
   ApproachObservation: object(approachProperties, ['vehicles', 'queueLength', 'waitingTime']),
-  TrafficInput: { ...perDirection(ref('ApproachInput')), additionalProperties: false },
-  TrafficObservation: perDirection(ref('ApproachObservation')),
+  TrafficInput: {
+    ...perDirection({ allOf: [ref('ApproachInput')], nullable: true }),
+    additionalProperties: false,
+    description: 'All four approaches. null = the producer has no source for that approach (e.g. its camera video is missing); at least one must be present.',
+  },
+  TrafficObservation: perDirection({ allOf: [ref('ApproachObservation')], nullable: true }),
   PedestriansInput: {
     ...object(Object.fromEntries(DIRECTIONS.map((d) => [d, { type: 'boolean', default: false }]))),
     additionalProperties: false, nullable: true,
@@ -61,7 +70,7 @@ const schemas = {
   EmergencyInput: {
     ...object({
       detected: bool,
-      type: { type: 'string', nullable: true, description: 'Required when detected=true: ambulance, police, fire_truck. Aliases police_car, firetruck, fire, fire_engine accepted; case, spaces and hyphens normalized.' },
+      type: { type: 'string', nullable: true, description: 'Required when detected=true: ambulance, police, fire_truck, or emergency (service unknown). Aliases police_car, firetruck, fire, fire_engine, emergency_vehicle accepted; case, spaces and hyphens normalized.' },
       direction: { ...direction, description: 'Approach the vehicle is coming from. Omitted/null direction is stored with a warning and gets no signal priority.' },
       confidence: { type: 'number', minimum: 0, maximum: 1, nullable: true },
     }, ['detected']),
@@ -82,6 +91,7 @@ const schemas = {
     intersectionId: id, timestamp: nullableDate, receivedAt: date, sequence: { type: 'integer' },
     source: { type: 'string', nullable: true }, traffic: ref('TrafficObservation'),
     pedestrians: perDirection(bool), emergency: ref('EmergencyInput'),
+    detectors: object({ pedestrians: bool, emergency: bool }),
   }),
   Decision: object({
     mode: { type: 'string', enum: MODES }, phase: { type: 'string', enum: PHASES },
@@ -95,8 +105,14 @@ const schemas = {
       pedestrianSignals: perDirection({ type: 'string', enum: PEDESTRIAN_SIGNALS }),
       phaseDuration: num, elapsed: num, holding: { type: 'string', nullable: true },
       signal: { type: 'object', description: 'Compact decision summary including remainingTime, greenTime and holding.' },
-      traffic: perDirection(object({ vehicles: num, queueLength: num, waiting: num })),
+      traffic: perDirection(object({
+        vehicles: { type: 'number', nullable: true }, queueLength: { type: 'number', nullable: true },
+        waiting: { type: 'number', nullable: true },
+        available: { type: 'boolean', description: 'false = no data for this approach (not received yet, or its camera is unavailable); counts are then null.' },
+        classes: { type: 'object', nullable: true }, confidence: { type: 'number', nullable: true },
+      })),
       pedestrians: perDirection(bool), pedestrianRequests: perDirection(bool),
+      detectors: object({ pedestrians: bool, emergency: bool }, []),
       scores: perDirection(num), redSeconds: perDirection(num),
       emergency: { type: 'object', description: 'Active emergency, observed detection, and candidate details.' },
       aiStatus: { type: 'string', enum: ['WAITING', 'CONNECTED', 'STALE'] },
@@ -111,7 +127,7 @@ const schemas = {
   }),
   IngestionResponse: ok({
     intersectionId: id, stored: object({ sequence: { type: 'integer' }, receivedAt: date, timestamp: nullableDate }),
-    warnings: array(str), decision: ref('Decision'), scores: perDirection(num), ignored: bool, reason: str,
+    warnings: array(str), decision: ref('Decision'), scores: perDirection(num),
   }),
   SimulationStatus: ok({
     dataMode: { type: 'string', enum: ['simulation'] }, state: { type: 'string', enum: ['stopped', 'running', 'paused', 'error'] },
@@ -152,18 +168,17 @@ function operation(path, method, tag, operationId, summary, schema, extras = {})
 operation('/api/health', 'get', 'System', 'getHealth', 'Backend and database health', ok({
   status: str, uptimeSeconds: num, serverTime: date, intersections: { type: 'integer' },
   aiFeeds: object({ connected: { type: 'integer' }, total: { type: 'integer' } }),
-  ingestion: object({ intersectionsWithData: { type: 'integer' } }), database: { type: 'object' },
+  ingestion: object({ intersectionsWithData: { type: 'integer' }, tokenRequired: bool }), database: { type: 'object' },
 }));
 operation('/api/client-config', 'get', 'System', 'getClientConfig', 'Public browser configuration', ok({ aiStreamUrl: { type: 'string', nullable: true } }));
 operation('/api/traffic', 'post', 'Live traffic', 'postTraffic', 'Send a perception observation to the live decision engine', ref('IngestionResponse'), {
-  description: 'Post about once per second per intersection, using one producer per intersection. All four traffic approaches are required. Directions indicate where vehicles come from. Body limit: 100 KB. Simulation data is rejected here.',
+  description: 'Post about once per second per intersection, using one producer per intersection. All four traffic approaches are required (null for an approach without a source). Directions indicate where vehicles come from. Body limit: 100 KB. When the backend sets TRAFFIC_INGEST_TOKEN, send it as "Authorization: Bearer <token>". Data tagged as simulated is rejected.',
   requestBody: body(ref('TrafficPayload'), {
     normal: { summary: 'Traffic with a pedestrian request', value: trafficExample },
     ambulance: { summary: 'Confirmed ambulance approaching from north', value: { ...trafficExample, emergency: { detected: true, type: 'ambulance', direction: 'north', confidence: 0.94 } } },
   }),
   responses: {
-    202: response('Accepted but ignored by a feed-priority guard', ref('IngestionResponse')),
-    400: error('Invalid payload or malformed JSON'), 404: error('Unknown intersection'),
+    400: error('Invalid payload or malformed JSON'), 401: error('Missing or invalid ingest token'), 404: error('Unknown intersection'),
     409: error('Capture timestamp older than latest stored observation'), 413: error('Body exceeds 100 KB'),
     415: error('Content-Type must be application/json'), 422: error('Reserved simulated source'),
     503: error('Traffic state store is full'),
@@ -221,7 +236,7 @@ module.exports = {
   openapi: '3.0.3',
   info: {
     title: 'Smart Traffic AI API', version: require('../package.json').version,
-    description: 'REST API for the Python/YOLO perception integration, live dashboard, historical records and isolated simulator. No authentication is currently required. Try it out sends requests to this backend. Socket.IO events are documented separately in the project README.',
+    description: 'REST API for the Python/YOLO perception integration, live dashboard, historical records and isolated simulator. POST /api/traffic requires the ingest token when TRAFFIC_INGEST_TOKEN is set. Try it out sends requests to this backend. Socket.IO events are documented separately in the project README.',
   },
   servers: [{ url: '/', description: 'Current backend host' }],
   tags: [

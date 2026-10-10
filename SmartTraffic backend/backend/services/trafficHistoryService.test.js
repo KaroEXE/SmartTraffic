@@ -218,7 +218,7 @@ test('schemas reject invalid records', () => {
   }).validateSync();
   assert.ok(bad);
   for (const path of [
-    'timestamp', 'receivedAt', 'traffic.north.vehicles', 'traffic.north.queueLength', 'traffic.south',
+    'timestamp', 'receivedAt', 'traffic.north.vehicles', 'traffic.north.queueLength',
     'pedestrians.north', 'emergency.type', 'emergency.confidence', 'signal.mode', 'signal.signals.north',
   ]) {
     assert.ok(bad.errors[path], `expected an error on ${path}; got ${Object.keys(bad.errors)}`);
@@ -235,6 +235,7 @@ test('connection errors are logged without credentials', () => {
 // -------------------------------------------------------------- data modes
 
 const { createSimulationService } = require('./simulationService');
+
 
 /**
  * In-memory stand-in for a mongoose model: create() appends, find() applies
@@ -340,6 +341,45 @@ test('history queries return exactly one mode; legacy rows are classified safely
   await assert.rejects(history.findTrafficRecords({ from: 'yesterday' }), /valid dates/);
   connected = false;
   await assert.rejects(history.findTrafficRecords({}), (err) => err.code === 'DB_UNAVAILABLE');
+});
+
+test('server wiring: live observations are saved as live records, unavailable approaches as null', async () => {
+  let t = Date.parse('2026-10-09T09:00:00Z');
+  const records = queryModel();
+  const events = queryModel();
+  const common = { TrafficRecord: records, SignalEvent: events, isConnected: () => true, log: { warn() {} } };
+  const intersections = [{ id: 'main', name: 'Main', lat: 0, lng: 0 }];
+
+  // As in server.js.
+  const engine = createTrafficDecisionService({ intersections, config, now: () => t });
+  const state = createTrafficStateService({ now: () => t });
+  const history = createTrafficHistoryService({ stateService: state, decisionService: engine, ...common }).start();
+
+  for (let s = 0; s < 60; s += 1) {
+    for (let q = 0; q < 4; q += 1) {
+      t += 250;
+      engine.tick();
+    }
+    if (s % 5 === 0) {
+      const body = { ...observation({ source: 'python-ai', emergency: null }), timestamp: new Date(t).toISOString() };
+      if (s === 30) body.traffic = { ...body.traffic, west: null }; // west camera video unavailable
+      const r = validateObservation(body);
+      assert.ok(r.ok, JSON.stringify(r.errors));
+      if (state.setTrafficState(r.value).stored) engine.ingest(r.value);
+    }
+  }
+  await history.flush();
+
+  const saved = await history.findTrafficRecords({ mode: 'live', limit: 1000 });
+  assert.equal(saved.length, 12, 'exactly the 12 real observations');
+  assert.equal(records.docs.length, 12, 'nothing else was written');
+  for (const doc of saved) {
+    assert.equal(doc.dataMode, 'live');
+    assertValid(TrafficRecord, doc);
+  }
+  assert.equal(saved.filter((d) => d.traffic.west === null).length, 1);
+  assert.ok(events.docs.length > 0);
+  assert.ok(events.docs.every((d) => d.dataMode === 'live'));
 });
 
 test('server wiring: a running simulation writes only simulation history, live only live', async () => {

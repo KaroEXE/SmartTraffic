@@ -1,6 +1,7 @@
 const { validateObservation, toDecisionInput, ID_PATTERN } = require('../utils/validation');
 const { trafficStateService } = require('../services/trafficStateService');
 const { DATA_MODES, SIMULATED_SOURCES } = require('../models/constants');
+const { requireToken } = require('../utils/auth');
 
 /** Validates ?mode&intersectionId&from&to&limit for the history endpoints. */
 function parseHistoryQuery(query) {
@@ -35,15 +36,18 @@ function parseHistoryQuery(query) {
  * `service` is the decision engine (only its public API is used);
  * `stateService` holds the latest validated observation per intersection.
  *
- * This controller serves LIVE traffic. Simulated data never enters through
- * POST /api/traffic: the reserved sources "mock" and "simulation" are
- * rejected, and the simulator feeds its own engine directly.
+ * This controller serves LIVE traffic. Only real perception data enters,
+ * through POST /api/traffic: when `ingestToken` is set the request must carry
+ * it as a Bearer token, and the reserved producer tags "mock" and
+ * "simulation" are always rejected (the simulator feeds its own engine
+ * directly). The same read handlers also serve /api/simulation.
  */
 function createTrafficController(service, {
   startedAt = Date.now(),
   stateService = trafficStateService,
   databaseHealth = null, // () => { status, ... } - historical data store, if configured
   history = null, // trafficHistoryService, if configured (read side only)
+  ingestToken = '', // TRAFFIC_INGEST_TOKEN; empty = open (local development)
 } = {}) {
   function unknownIntersection(res, id) {
     return res.status(404).json({
@@ -53,7 +57,7 @@ function createTrafficController(service, {
     });
   }
 
-  return {
+  const controller = {
     health(req, res) {
       const intersections = service.listIntersections();
       const connected = intersections.filter((i) => i.aiStatus === 'CONNECTED').length;
@@ -66,6 +70,7 @@ function createTrafficController(service, {
         aiFeeds: { connected, total: intersections.length },
         ingestion: {
           intersectionsWithData: stateService.getAllTrafficStates().length,
+          tokenRequired: Boolean(ingestToken),
         },
         ...(databaseHealth ? { database: databaseHealth() } : {}),
       });
@@ -84,7 +89,7 @@ function createTrafficController(service, {
       if (SIMULATED_SOURCES.includes(observation.source)) {
         return res.status(422).json({
           ok: false,
-          error: `source "${observation.source}" is reserved for simulated data and is not accepted on live ingestion`,
+          error: `source "${observation.source}" is reserved for simulated data and is not accepted`,
           hint: 'Use the dashboard Simulation mode; live ingestion only accepts real perception data',
         });
       }
@@ -94,14 +99,6 @@ function createTrafficController(service, {
 
       const stored = stateService.setTrafficState(observation);
       if (!stored.stored) {
-        if (stored.reason === 'live-feed-active') {
-          return res.status(202).json({
-            ok: true,
-            ignored: true,
-            intersectionId: observation.intersectionId,
-            reason: 'A live perception feed is active for this intersection; mock data is ignored',
-          });
-        }
         if (stored.reason === 'stale') {
           return res.status(409).json({
             ok: false,
@@ -126,9 +123,6 @@ function createTrafficController(service, {
         },
       };
       if (result.warnings.length) body.warnings = result.warnings;
-      if (snap && snap.ignored) {
-        return res.status(202).json({ ...body, ignored: true, reason: 'Decision engine ignored mock data (live feed active)' });
-      }
       if (snap) {
         body.decision = {
           mode: snap.mode,
@@ -143,8 +137,7 @@ function createTrafficController(service, {
       return res.json(body);
     },
 
-    // Decision-engine snapshots (signals, phase, events). Used by the
-    // dashboard and the mock client.
+    // Decision-engine snapshots (signals, phase, events). Used by the dashboard.
     getAllStates(req, res) {
       res.json({ ok: true, intersections: service.getAllSnapshots() });
     },
@@ -184,6 +177,9 @@ function createTrafficController(service, {
     getHistoryTraffic: historyHandler('findTrafficRecords'),
     getHistorySignals: historyHandler('findSignalEvents'),
   };
+  // Token check first, so an unauthorized body is never validated or stored.
+  controller.postTrafficHandlers = [requireToken(ingestToken, { openWhenUnset: true }), controller.postTraffic];
+  return controller;
 
   function historyHandler(method) {
     return async (req, res) => {

@@ -11,7 +11,7 @@ function createTrafficRoutes(controller, { mode = 'live' } = {}) {
 
   if (mode === 'live') {
     router.get('/health', controller.health);
-    router.post('/traffic', controller.postTraffic);
+    router.post('/traffic', ...controller.postTrafficHandlers);
     router.get('/traffic/observations', controller.getAllObservations);
     router.get('/traffic/observations/:intersectionId', controller.getObservation);
     router.get('/history/traffic', controller.getHistoryTraffic);

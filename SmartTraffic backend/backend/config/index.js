@@ -24,15 +24,38 @@ function httpUrl(name) {
   return '';
 }
 
+/**
+ * Base URL of the Python/Flask AI service, without a trailing slash. The
+ * browser loads <base>/video/<direction> and <base>/api/cameras from it.
+ * An older single-stream value such as https://ai.example/video/north is
+ * reduced to its base. User info, query and fragment are dropped: the value
+ * is sent to browsers.
+ */
+function aiServiceBaseUrl(name) {
+  const raw = httpUrl(name);
+  if (!raw) return '';
+  const url = new URL(raw);
+  url.username = '';
+  url.password = '';
+  url.search = '';
+  url.hash = '';
+  url.pathname = url.pathname.replace(/\/(?:video\/[^/]*|video_feed)\/?$/, '').replace(/\/+$/, '');
+  return url.href.replace(/\/+$/, '');
+}
+
 const config = {
   port: num('PORT', 3000),
   corsOrigin: process.env.CORS_ORIGIN || '*',
   // Historical data store. Never log this value: it may contain credentials.
   mongodbUri: (process.env.MONGODB_URI || '').trim(),
-  // Python/Flask camera stream shown on the dashboard's Live AI page, e.g.
-  // http://<flask-host>:5000/video_feed. Sent to browsers, so never put
+  // Python/Flask AI service whose four camera streams the Live AI page shows,
+  // e.g. https://<ai-service>.onrender.com. Sent to browsers, so never put
   // credentials in it. Empty = the page shows "not connected".
-  aiStreamUrl: httpUrl('AI_STREAM_URL'),
+  aiStreamUrl: aiServiceBaseUrl('AI_STREAM_URL'),
+  // Shared secret the AI service sends as "Authorization: Bearer <token>" on
+  // POST /api/traffic. Empty = ingestion is open (local development only).
+  // Never log this value.
+  trafficIngestToken: (process.env.TRAFFIC_INGEST_TOKEN || '').trim(),
 
   weights: {
     vehicles: num('WEIGHT_VEHICLES', 2),
