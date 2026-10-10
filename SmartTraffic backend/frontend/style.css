@@ -790,7 +790,7 @@ section.sim .block-head { margin-bottom: 6px; }
 
 .lai-stream { position: absolute; inset: 0; }
 .lai-stream:empty { display: none; }
-.lai-stream img, .lai-stream video { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
+.lai-stream img, .lai-stream video { width: 100%; height: 100%; object-fit: cover; display: block; background: #000; }
 
 .lai-side { background: var(--surface); border-left: 1px solid var(--line); overflow-y: auto; min-height: 0; }
 
