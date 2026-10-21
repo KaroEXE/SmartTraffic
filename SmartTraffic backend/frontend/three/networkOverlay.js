@@ -221,7 +221,8 @@ export class NetworkOverlay {
           el.textContent = `${c.type.toUpperCase()} · ${eta} · ${e.stage.toUpperCase()}${e.status !== 'ok' ? ` · ${e.status.replace('-', ' ').toUpperCase()}` : ''}`;
           el.title = e.reason || `${e.approach} approach ${confirmed ? '- signal action sent' : '- planned, no signal change yet'}`;
           this.tagLayer.appendChild(el);
-          this.chips.push({ el, anchor: new THREE.Vector3(site.x, 24, site.z) });
+          // Above the intersection label (16 m), so the two never overlap.
+          this.chips.push({ el, anchor: new THREE.Vector3(site.x, 34, site.z) });
         }
       }
 

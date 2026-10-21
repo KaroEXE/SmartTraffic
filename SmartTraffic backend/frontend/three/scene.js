@@ -48,6 +48,14 @@ const BEACON_FADE = [170, 300];
 const FOCUS_LABEL_DISTANCE = 230;
 const SHADOW_MIN = 125;
 const SHADOW_MAX = 520;
+// Camera clearance: low over roads, above the tallest building (34 m + roof
+// plant) over city blocks, so the camera never ends up inside a building.
+const MIN_HEIGHT_ROAD = 6;
+const MIN_HEIGHT_BLOCK = 40;
+// Keyboard steps (viewport focused): share of the view distance / degrees.
+const KEY_PAN_SHARE = 0.06;
+const KEY_ROTATE = THREE.MathUtils.degToRad(10);
+const KEY_ZOOM = 0.85;
 
 export class TrafficScene {
   constructor(container, {
@@ -56,6 +64,8 @@ export class TrafficScene {
     this.container = container;
     this.tagLayer = tagLayer;
     this.compass = compass;
+    // Only the dial turns, so the compass button itself stays put.
+    this.compassNeedle = compass ? (compass.querySelector('.compass-dial') || compass) : null;
     this.statusLayer = statusLayer;
     this.onSelect = onSelect;
     this.time = 0;
@@ -90,16 +100,20 @@ export class TrafficScene {
 
     const controls = new OrbitControls(this.camera, renderer.domElement);
     controls.target.copy(HOME_TARGET_OFFSET);
+    // Mouse: left-drag rotate, right-drag (or Ctrl/Shift + left-drag) pan
+    // across the ground, wheel zoom toward the cursor. Touch: one finger
+    // rotates, two fingers zoom and pan.
     controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
-    controls.rotateSpeed = 0.55;
-    controls.zoomSpeed = 0.8;
-    controls.panSpeed = 0.6;
+    controls.dampingFactor = 0.1;
+    controls.rotateSpeed = 0.6;
+    controls.zoomSpeed = 1.0;
+    controls.panSpeed = 0.8;
+    controls.zoomToCursor = true;
     controls.screenSpacePanning = false;
-    controls.minDistance = 25;
+    controls.minDistance = 20;
     controls.maxDistance = 260;
-    controls.minPolarAngle = 0.12;
-    controls.maxPolarAngle = 1.32;
+    controls.minPolarAngle = 0.05;
+    controls.maxPolarAngle = 1.35; // never below the horizon
     controls.addEventListener('change', () => {
       // Keep the pivot on the ground and over the street network.
       const t = controls.target;
@@ -107,10 +121,12 @@ export class TrafficScene {
       t.y = 0;
       t.x = THREE.MathUtils.clamp(t.x, b.minX, b.maxX);
       t.z = THREE.MathUtils.clamp(t.z, b.minZ, b.maxZ);
+      this._keepAboveScenery();
     });
     controls.addEventListener('start', () => { this.tween = null; });
     controls.update();
     this.controls = controls;
+    this._bindNavigation();
 
     // Lighting: soft sky fill + one shadow-casting sun that follows the view.
     scene.add(new THREE.HemisphereLight(0xdfe7f0, 0x1b1e22, 1.15));
@@ -320,14 +336,86 @@ export class TrafficScene {
     };
   }
 
-  /** Back to the selected intersection's default view. */
+  /** Centres the selected intersection (its close-up view). */
   resetView() {
     this._tweenTo(this._homeView());
   }
 
-  /** Frames the whole street network. */
+  focusSelected() {
+    this.resetView();
+  }
+
+  /** The default overview of the whole network (the initial camera). */
   overview() {
     this._tweenTo(this._overviewView());
+  }
+
+  resetCamera() {
+    this.overview();
+  }
+
+  /** Frames every intersection, keeping the current viewing direction. */
+  fitNetwork() {
+    const offset = this.camera.position.clone().sub(this.controls.target);
+    const sph = new THREE.Spherical().setFromVector3(offset);
+    // A very flat view would need a huge distance: fit from at least ~35 deg above the horizon.
+    sph.phi = Math.min(sph.phi, 0.95);
+    sph.radius = 1;
+    this._tweenTo(this._overviewView(new THREE.Vector3().setFromSpherical(sph)));
+  }
+
+  /** factor < 1 zooms in, > 1 zooms out (within the zoom limits). */
+  zoomBy(factor, { animate = true } = {}) {
+    const t = this.controls.target;
+    const offset = this.camera.position.clone().sub(t);
+    const d = THREE.MathUtils.clamp(offset.length() * factor, this.controls.minDistance, this.controls.maxDistance);
+    const view = { position: t.clone().add(offset.setLength(d)), target: t.clone() };
+    if (animate) this._tweenTo(view, 0.35);
+    else this._jumpTo(view);
+  }
+
+  /** Rotates around the pivot (radians, positive = counter-clockwise seen from above). */
+  rotateBy(angle, { animate = true } = {}) {
+    const t = this.controls.target;
+    const offset = this.camera.position.clone().sub(t).applyAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+    const view = { position: t.clone().add(offset), target: t.clone() };
+    if (animate) this._tweenTo(view, 0.35);
+    else this._jumpTo(view);
+  }
+
+  /** Turns the view so that north is up, keeping distance and tilt. */
+  northUp() {
+    const t = this.controls.target;
+    const sph = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(t));
+    sph.theta = 0; // camera south of the pivot, looking north
+    this._tweenTo({ position: t.clone().add(new THREE.Vector3().setFromSpherical(sph)), target: t.clone() });
+  }
+
+  /** Moves across the ground relative to the view: right / forward in units of the view distance. */
+  panBy(right, forward) {
+    const t = this.controls.target;
+    const offset = this.camera.position.clone().sub(t);
+    const fwd = new THREE.Vector3(-offset.x, 0, -offset.z);
+    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+    fwd.normalize();
+    const rgt = new THREE.Vector3(-fwd.z, 0, fwd.x);
+    const step = offset.length();
+    const move = rgt.multiplyScalar(right * step).add(fwd.multiplyScalar(forward * step));
+    this.tween = null;
+    t.add(move);
+    this.camera.position.add(move);
+    this.controls.dispatchEvent({ type: 'change' }); // clamp to the network
+    this.controls.update();
+  }
+
+  /** Flies the pivot to a ground point, keeping the viewing angle and distance. */
+  flyTo(point) {
+    const b = this._panBounds();
+    const to = new THREE.Vector3(
+      THREE.MathUtils.clamp(point.x, b.minX, b.maxX), 0, THREE.MathUtils.clamp(point.z, b.minZ, b.maxZ),
+    );
+    const offset = this.camera.position.clone().sub(this.controls.target);
+    this._tweenTo({ position: to.clone().add(offset), target: to });
   }
 
   // ------------------------------------------------------------ internals
@@ -370,8 +458,11 @@ export class TrafficScene {
     };
   }
 
-  /** A view of the whole network: the closest distance at which every junction and its legs fit. */
-  _overviewView() {
+  /**
+   * A view of the whole network: the closest distance at which every
+   * junction and its legs fit, seen from `dir` (default: the overview angle).
+   */
+  _overviewView(dir = OVERVIEW_DIR) {
     const b = this.layout.bounds;
     const margin = LAYOUT.roadLength * 0.55;
     const target = new THREE.Vector3((b.minX + b.maxX) / 2, 0, (b.minZ + b.maxZ) / 2);
@@ -384,7 +475,7 @@ export class TrafficScene {
     const cam = this.camera.clone();
     const v = new THREE.Vector3();
     const fits = (dist) => {
-      cam.position.copy(target).addScaledVector(OVERVIEW_DIR, dist);
+      cam.position.copy(target).addScaledVector(dir, dist);
       cam.lookAt(target);
       cam.updateMatrixWorld();
       return corners.every((c) => {
@@ -399,7 +490,7 @@ export class TrafficScene {
       if (fits(mid)) hi = mid;
       else lo = mid;
     }
-    return { position: target.clone().addScaledVector(OVERVIEW_DIR, hi), target, distance: hi };
+    return { position: target.clone().addScaledVector(dir, hi), target, distance: hi };
   }
 
   _updateZoomLimits() {
@@ -420,14 +511,88 @@ export class TrafficScene {
     this.controls.update();
   }
 
-  _tweenTo(view) {
+  /** Smooth camera move; the duration grows with the distance travelled. */
+  _tweenTo(view, duration = null) {
+    const travel = this.camera.position.distanceTo(view.position) + this.controls.target.distanceTo(view.target);
     this.tween = {
       t: 0,
+      duration: duration || THREE.MathUtils.clamp(0.45 + travel / 900, 0.5, 1.4),
       fromPos: this.camera.position.clone(),
       fromTarget: this.controls.target.clone(),
       toPos: view.position,
       toTarget: view.target,
     };
+  }
+
+  /** Over a city block the camera stays above the rooftops; over roads it may go low. */
+  _keepAboveScenery() {
+    const p = this.camera.position;
+    const minHeight = this._overBuildings(p.x, p.z) ? MIN_HEIGHT_BLOCK : MIN_HEIGHT_ROAD;
+    if (p.y < minHeight) p.y = minHeight;
+  }
+
+  _overBuildings(x, z) {
+    if (!this.layout) return false;
+    const { bounds, spacing } = this.layout;
+    const reach = LAYOUT.roadLength;
+    if (x < bounds.minX - reach || x > bounds.maxX + reach || z < bounds.minZ - reach || z > bounds.maxZ + reach) return false;
+    const band = LAYOUT.roadHalf + LAYOUT.sidewalk;
+    const nearLine = (v, origin) => {
+      const d = (((v - origin) % spacing) + spacing) % spacing;
+      return Math.min(d, spacing - d) <= band;
+    };
+    return !nearLine(x, bounds.minX) && !nearLine(z, bounds.minZ);
+  }
+
+  /** Keyboard (while the 3D view has focus) and double-click navigation. */
+  _bindNavigation() {
+    const el = this.container;
+    const canvas = this.renderer.domElement;
+    // Clicking the map gives it keyboard focus (without scrolling the page).
+    canvas.addEventListener('pointerdown', () => {
+      if (document.activeElement !== el) el.focus({ preventScroll: true });
+    });
+    canvas.addEventListener('dblclick', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc, this.camera);
+      const hit = new THREE.Vector3();
+      if (ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hit)) this.flyTo(hit);
+    });
+    el.addEventListener('keydown', (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const tag = e.target && e.target.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      const actions = {
+        ArrowUp: () => this.panBy(0, KEY_PAN_SHARE),
+        w: () => this.panBy(0, KEY_PAN_SHARE),
+        ArrowDown: () => this.panBy(0, -KEY_PAN_SHARE),
+        s: () => this.panBy(0, -KEY_PAN_SHARE),
+        ArrowLeft: () => this.panBy(-KEY_PAN_SHARE, 0),
+        a: () => this.panBy(-KEY_PAN_SHARE, 0),
+        ArrowRight: () => this.panBy(KEY_PAN_SHARE, 0),
+        d: () => this.panBy(KEY_PAN_SHARE, 0),
+        q: () => this.rotateBy(KEY_ROTATE, { animate: false }),
+        e: () => this.rotateBy(-KEY_ROTATE, { animate: false }),
+        '+': () => this.zoomBy(KEY_ZOOM, { animate: false }),
+        '=': () => this.zoomBy(KEY_ZOOM, { animate: false }),
+        '-': () => this.zoomBy(1 / KEY_ZOOM, { animate: false }),
+        _: () => this.zoomBy(1 / KEY_ZOOM, { animate: false }),
+        f: () => this.fitNetwork(),
+        c: () => this.focusSelected(),
+        r: () => this.resetCamera(),
+        Home: () => this.resetCamera(),
+        n: () => this.northUp(),
+      };
+      // Buttons keep Enter / Space; everything else here belongs to the map.
+      if (tag === 'BUTTON' && (k === 'Enter' || k === ' ')) return;
+      const action = actions[k];
+      if (!action) return;
+      e.preventDefault();
+      action();
+    });
   }
 
   // -------------------------------------------------- approach tags
@@ -682,8 +847,9 @@ export class TrafficScene {
     }
 
     if (this.tween) {
-      this.tween.t = Math.min(1, this.tween.t + dt / 0.9);
-      const k = 1 - (1 - this.tween.t) ** 3;
+      this.tween.t = Math.min(1, this.tween.t + dt / this.tween.duration);
+      const x = this.tween.t;
+      const k = x < 0.5 ? 4 * x * x * x : 1 - (-2 * x + 2) ** 3 / 2; // ease in-out
       this.camera.position.lerpVectors(this.tween.fromPos, this.tween.toPos, k);
       this.controls.target.lerpVectors(this.tween.fromTarget, this.tween.toTarget, k);
       if (this.tween.t >= 1) this.tween = null;
@@ -697,8 +863,8 @@ export class TrafficScene {
     this.renderer.render(this.scene, this.camera);
     this._updateOverlays(distance);
 
-    if (this.compass) {
-      this.compass.style.transform = `rotate(${this.controls.getAzimuthalAngle()}rad)`;
+    if (this.compassNeedle) {
+      this.compassNeedle.style.transform = `rotate(${this.controls.getAzimuthalAngle()}rad)`;
     }
   }
 }

@@ -37,13 +37,21 @@ export function initDecisionPanel({ select }) {
   const panel = $('vp-decision');
   if (!panel) return;
   const toggle = $('vd-toggle');
-  const narrow = window.matchMedia('(max-width: 900px)').matches;
-  const setOpen = (open) => {
+  // The viewer's last choice wins; otherwise open only when the map has room for it.
+  const KEY = 'smarttraffic.decisionPanel.open';
+  let saved = null;
+  try { saved = localStorage.getItem(KEY); } catch { /* storage unavailable */ }
+  const viewport = $('viewport');
+  const roomy = (viewport ? viewport.clientWidth : window.innerWidth) >= 1100;
+  const setOpen = (open, remember = false) => {
     panel.classList.toggle('collapsed', !open);
     toggle.setAttribute('aria-expanded', String(open));
+    if (remember) {
+      try { localStorage.setItem(KEY, open ? '1' : '0'); } catch { /* storage unavailable */ }
+    }
   };
-  setOpen(!narrow);
-  toggle.addEventListener('click', () => setOpen(panel.classList.contains('collapsed')));
+  setOpen(saved === null ? roomy : saved === '1');
+  toggle.addEventListener('click', () => setOpen(panel.classList.contains('collapsed'), true));
   $('vd-list').addEventListener('click', (e) => {
     const item = e.target.closest('[data-id]');
     if (item) onSelect(item.dataset.id);

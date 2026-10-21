@@ -117,8 +117,18 @@ async function createScene() {
       statusLayer: document.getElementById('vp-data-state'),
       onSelect: (id) => selectIntersection(id, { pan: true }),
     });
-    document.getElementById('reset-view').addEventListener('click', () => scene.resetView());
-    document.getElementById('network-view').addEventListener('click', () => scene.overview());
+    // Camera toolbar (keyboard equivalents are handled by the scene while the map has focus).
+    const camera = {
+      'compass': () => scene.northUp(),
+      'cam-zoom-in': () => scene.zoomBy(0.75),
+      'cam-zoom-out': () => scene.zoomBy(1 / 0.75),
+      'cam-rotate-left': () => scene.rotateBy(Math.PI / 6),
+      'cam-rotate-right': () => scene.rotateBy(-Math.PI / 6),
+      'focus-view': () => scene.focusSelected(),
+      'network-view': () => scene.fitNetwork(),
+      'reset-view': () => scene.resetCamera(),
+    };
+    for (const [id, action] of Object.entries(camera)) document.getElementById(id).addEventListener('click', action);
     const legend = document.getElementById('legend-toggle');
     const legendPanel = document.getElementById('vp-legend-panel');
     legend.addEventListener('click', () => {
