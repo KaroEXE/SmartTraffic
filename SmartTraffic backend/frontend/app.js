@@ -4,13 +4,18 @@ import * as dash from './dashboard.js';
 import { SimControls } from './simControls.js';
 import { initializeLiveAI, updateFromLiveSnapshot } from './liveAI.js';
 import { createModeStore } from './modeStore.js';
+import { initAnalytics } from './analytics.js';
+import { initDecisionPanel, renderDecision, setNames } from './decisionPanel.js';
 
 /**
  * Orchestration only:
  *   Socket.IO snapshots -> mode store -> map markers, intersection list,
- *   and (for the selected intersection) dashboard + Live AI panels + 3D scene.
+ *   the 3D street network (every intersection of the active mode, each on
+ *   its own junction), and (for the selected intersection) dashboard +
+ *   Live AI panels + the 3D scene's camera, tags and status.
  *
- * Map click -> selectIntersection(id) -> everything re-targets the same id.
+ * Map click or 3D label click -> selectIntersection(id) -> everything
+ * re-targets the same id.
  *
  * Two data modes that are never mixed (see modeStore.js):
  *   live        real perception data: AI service (YOLO on the camera videos)
@@ -43,7 +48,58 @@ const state = {
   socket: null,
   connected: false,
   simStatus: null,
+  // Camera stream registry status (GET /api/streams/status, socket `streamStatus`).
+  streams: { loading: true, error: null, status: null },
+  // Per data mode: the road network topology and the latest network decision.
+  network: { live: { topology: null, decision: null }, simulation: { topology: null, decision: null } },
 };
+
+/** Topology + latest network decision of the active mode -> 3D scene, decision panel, map. */
+function renderNetwork({ topology = false } = {}) {
+  const net = state.network[store.mode];
+  if (state.scene) {
+    if (topology) state.scene.setNetworkTopology(net.topology);
+    state.scene.applyNetworkDecision(net.decision);
+  }
+  if (state.map) state.map.setDecision(net.decision);
+  renderDecision(net.decision, { mode: store.mode, selectedId: store.selectedId, connected: state.connected });
+}
+
+/** Network state of one mode from init / REST: { topology, decision }. */
+function acceptNetwork(mode, network) {
+  if (!network) return;
+  const known = state.network[mode];
+  const topologyChanged = JSON.stringify(known.topology) !== JSON.stringify(network.topology || null);
+  state.network[mode] = { topology: network.topology || null, decision: network.decision || null };
+  if (mode === store.mode) renderNetwork({ topology: topologyChanged });
+}
+
+async function loadNetwork(mode) {
+  try {
+    const base = mode === 'simulation' ? '/api/simulation' : '/api';
+    const body = await fetchJson(`${base}/network`);
+    if (!state.network[mode].decision || (body.decision && body.decision.cycle >= state.network[mode].decision.cycle)) {
+      acceptNetwork(mode, body);
+    }
+  } catch (err) {
+    console.warn('Network state unavailable:', err.message);
+  }
+}
+
+function renderCameras() {
+  dash.renderCameras(state.streams, store.selectedId, store.mode);
+}
+
+async function loadStreamStatus() {
+  try {
+    const res = await fetch('/api/streams/status', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`status ${res.status}`);
+    state.streams = { loading: false, error: null, status: await res.json() };
+  } catch {
+    state.streams = { loading: false, error: 'Camera stream status unavailable', status: null };
+  }
+  renderCameras();
+}
 
 async function fetchJson(url) {
   const res = await fetch(url, { cache: 'no-store' });
@@ -59,8 +115,16 @@ async function createScene() {
       tagLayer: document.getElementById('vp-tags'),
       compass: document.getElementById('compass'),
       statusLayer: document.getElementById('vp-data-state'),
+      onSelect: (id) => selectIntersection(id, { pan: true }),
     });
     document.getElementById('reset-view').addEventListener('click', () => scene.resetView());
+    document.getElementById('network-view').addEventListener('click', () => scene.overview());
+    const legend = document.getElementById('legend-toggle');
+    const legendPanel = document.getElementById('vp-legend-panel');
+    legend.addEventListener('click', () => {
+      legendPanel.hidden = !legendPanel.hidden;
+      legend.setAttribute('aria-expanded', String(!legendPanel.hidden));
+    });
     return scene;
   } catch (err) {
     console.error('3D view failed to start:', err);
@@ -97,6 +161,7 @@ function renderSelected({ load = false } = {}) {
     dash.render(snap, dataState);
     dash.tickCountdown(snap, isFrozen() || !state.connected);
   }
+  renderCameras();
   if (state.scene) {
     state.scene.setDataState(dataState, snap);
     if (store.mode === 'simulation') state.scene.setFrozen(isFrozen());
@@ -121,24 +186,31 @@ function onSnapshot(snap) {
   dash.updateListRow(snap);
   dash.setFeeds(store.all());
   if (snap.intersectionId === store.selectedId) renderSelected();
+  else if (state.scene) state.scene.applyState(snap); // its own junction only
 }
 
 /** Socket `init` (after connect / subscribe) and `simulationReset`: all snapshots of one mode. */
 function onInit(payload) {
   if (payload.simulation) applySimStatus(payload.simulation);
+  if (payload.network) acceptNetwork(payload.dataMode || 'live', payload.network);
   const current = store.replaceAll(payload.dataMode || 'live', payload.intersections.map(stamp));
   if (!current) return;
-  redrawOverview();
+  redrawOverview({ reload: true });
   renderSelected({ load: true });
 }
 
-/** Map markers, intersection list and feed pill from the active mode only. */
-function redrawOverview() {
+/**
+ * Map markers, intersection list, feed pill and the 3D network from the
+ * active mode only. `reload`: the mode's state was replaced, so every 3D
+ * intersection starts from a clean picture.
+ */
+function redrawOverview({ reload = false } = {}) {
   const snaps = store.all();
   dash.resetListRows();
   if (state.map) state.map.setSnapshots(snaps);
   snaps.forEach((s) => dash.updateListRow(s));
   dash.setFeeds(snaps);
+  if (state.scene) state.scene.applyAll(snaps, { reload });
 }
 
 // ------------------------------------------------------------ selection
@@ -150,6 +222,8 @@ async function selectIntersection(id, { pan = false, force = false } = {}) {
   if (window.location.hash !== `#${id}`) window.history.replaceState(null, '', `#${id}`);
 
   if (state.map) state.map.select(id, { pan });
+  if (state.scene) state.scene.focusIntersection(id);
+  renderDecision(state.network[store.mode].decision, { mode: store.mode, selectedId: id, connected: state.connected });
   if (state.sim) state.sim.refresh();
 
   // Render immediately from cached socket state, then load the full state
@@ -192,11 +266,17 @@ function applyModeChrome() {
   if (state.scene) state.scene.setFrozen(store.mode === 'simulation' && isFrozen());
 }
 
-/** The intersection list and map markers of the active mode. */
+/** The intersection list, map markers and 3D street network of the active mode. */
 function showModeIntersections() {
   const list = intersections();
   dash.renderIntersectionList(list, selectIntersection);
   if (state.map && list.length) state.map.setIntersections(list);
+  setNames(list);
+  // The other mode's roads are never drawn on this mode's network.
+  if (state.scene) state.scene.setNetworkTopology(state.network[store.mode].topology);
+  if (state.scene) state.scene.setNetwork(list);
+  renderNetwork();
+  loadNetwork(store.mode);
 }
 
 async function setMode(mode) {
@@ -226,6 +306,7 @@ function connectSocket() {
 
   socket.on('connect', () => {
     state.connected = true;
+    if (state.map) state.map.setConnected(true);
     dash.setConnection('connected', socket.io.engine.transport.name);
     // Every connection starts in the live room; rejoin the simulation room if needed.
     if (store.mode !== 'live') socket.emit('subscribe', { mode: store.mode });
@@ -234,6 +315,7 @@ function connectSocket() {
   });
   socket.on('disconnect', () => {
     state.connected = false;
+    if (state.map) state.map.setConnected(false);
     dash.setConnection('disconnected');
     renderSelected();
   });
@@ -246,6 +328,15 @@ function connectSocket() {
     if (store.isCurrentEvent(evt)) dash.appendEvent(evt);
   });
   socket.on('simulationStatus', applySimStatus);
+  socket.on('networkDecision', (decision) => {
+    const mode = decision && decision.dataMode === 'simulation' ? 'simulation' : 'live';
+    state.network[mode] = { ...state.network[mode], decision };
+    if (mode === store.mode) renderNetwork();
+  });
+  socket.on('streamStatus', (status) => {
+    state.streams = { loading: false, error: null, status };
+    renderCameras();
+  });
   socket.on('simulationReset', (payload) => {
     onInit(payload);
     if (store.mode === 'simulation' && store.selectedId) selectIntersection(store.selectedId, { force: true });
@@ -273,6 +364,8 @@ async function loadLists() {
 
 async function boot() {
   initializeLiveAI();
+  initAnalytics();
+  initDecisionPanel({ select: (id) => selectIntersection(id, { pan: true }) });
   dash.initLayout();
   dash.tickClock();
   dash.setDataState('offline', null);
@@ -287,8 +380,14 @@ async function boot() {
   dash.renderIntersectionList(list, selectIntersection);
   state.map = new NetworkMap(document.getElementById('map'), list, (id) => selectIntersection(id));
   state.scene = await scenePromise;
-  // Console diagnostics, e.g. trafficScene.stats()
-  if (state.scene) window.trafficScene = state.scene;
+  setNames(list);
+  await loadNetwork('live');
+  if (state.scene) {
+    state.scene.setNetworkTopology(state.network.live.topology);
+    state.scene.setNetwork(list);
+    // Console diagnostics, e.g. trafficScene.stats()
+    window.trafficScene = state.scene;
+  }
   state.sim = new SimControls(() => store.selectedId, applySimStatus);
   applyModeChrome();
 
@@ -296,6 +395,7 @@ async function boot() {
   const initial = list.some((i) => i.id === fromHash) ? fromHash : list[0].id;
 
   connectSocket();
+  loadStreamStatus();
   await selectIntersection(initial);
 
   setInterval(() => {
@@ -304,6 +404,8 @@ async function boot() {
     dash.tickCountdown(snap, isFrozen() || !state.connected);
     dash.tickDataAge(dataStateOf(snap), snap);
   }, 200);
+  // Stream health ages ("last frame 40 s ago", stale after 60 s) move with time.
+  setInterval(renderCameras, 5000);
 }
 
 window.addEventListener('hashchange', () => {

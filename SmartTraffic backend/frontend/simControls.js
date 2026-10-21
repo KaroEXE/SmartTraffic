@@ -34,6 +34,21 @@ export class SimControls {
     this.pauseBtn.addEventListener('click', () => this._post('/pause'));
     this.resetBtn.addEventListener('click', () => this._post('/reset'));
     this.tour.addEventListener('change', () => this._post('/tour', { intersectionId: this.getSelectedId(), enabled: this.tour.checked }));
+
+    // Network-wide optimisation and the simulated emergency vehicle.
+    this.network = document.getElementById('sim-network');
+    this.ambHeading = document.getElementById('sim-amb-heading');
+    this.ambGo = document.getElementById('sim-amb-go');
+    this.ambCancel = document.getElementById('sim-amb-cancel');
+    this.ambState = document.getElementById('sim-amb-state');
+    if (this.network) {
+      this.network.addEventListener('change', () => this._post('/network', { enabled: this.network.checked }));
+      this.ambGo.addEventListener('click', () => this._post('/ambulance', { from: this.getSelectedId(), heading: this.ambHeading.value }));
+      this.ambCancel.addEventListener('click', () => {
+        const a = this.status && this.status.ambulances && this.status.ambulances[0];
+        if (a) this._send('DELETE', `/ambulance/${encodeURIComponent(a.id)}`);
+      });
+    }
   }
 
   setActive(active) {
@@ -72,6 +87,24 @@ export class SimControls {
     this.grid.querySelectorAll('.sim-btn').forEach((btn) => {
       btn.classList.toggle('current', Boolean(ix) && btn.dataset.id === ix.scenario);
     });
+    this._applyNetwork(status);
+  }
+
+  _applyNetwork(status) {
+    if (!this.network) return;
+    if (status.network) this.network.checked = Boolean(status.network.enabled);
+    const active = status.ambulances || [];
+    this.ambCancel.hidden = !active.length;
+    if (active.length) {
+      const a = active[0];
+      const wait = a.waiting ? ` · stopped (${a.waiting})` : '';
+      this.ambState.textContent = `SIMULATED ${a.type.toUpperCase()} ${a.id}: ${a.distanceM} m to ${a.towards} · stops ${a.stops}${wait} · route ${a.route.join(' > ')}`;
+    } else if (status.lastAmbulance) {
+      const l = status.lastAmbulance;
+      this.ambState.textContent = `Last ${l.type}: ${l.route.join(' > ')} in ${l.travelSeconds} s - ${l.stops} stop${l.stops === 1 ? '' : 's'}, ${l.delaySeconds} s delay vs free flow`;
+    } else {
+      this.ambState.textContent = 'Dispatch sends a simulated ambulance from the selected intersection; the corridor prepares the next 3 intersections on its route.';
+    }
   }
 
   _build(scenarios) {
@@ -93,12 +126,16 @@ export class SimControls {
     });
   }
 
-  async _post(path, body) {
+  _post(path, body) {
+    return this._send('POST', path, body);
+  }
+
+  async _send(method, path, body) {
     try {
       const res = await fetch(`${API}${path}`, {
-        method: 'POST',
+        method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body || {}),
+        body: method === 'DELETE' ? undefined : JSON.stringify(body || {}),
       });
       const data = await res.json();
       if (res.ok) this.onStatus(data);

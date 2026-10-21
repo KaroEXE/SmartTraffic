@@ -73,19 +73,24 @@ function emptyNote(text) {
 
 // -------------------------------------------------------------- navigation
 
-/** Switches between the existing operations view and the Live AI view. */
+const VIEWS = ['operations', 'live-ai', 'analytics'];
+
+/** Switches between the operations view, the Live AI view and the Analytics view. */
 export function showView(view) {
   const app = document.querySelector('.app');
-  const live = view === 'live-ai';
-  if (live) app.dataset.view = 'live-ai';
-  else delete app.dataset.view;
-  el.view.hidden = !live;
+  const current = VIEWS.includes(view) ? view : 'operations';
+  if (current === 'operations') delete app.dataset.view;
+  else app.dataset.view = current;
+  el.view.hidden = current !== 'live-ai';
+  const analytics = document.getElementById('analytics');
+  if (analytics) analytics.hidden = current !== 'analytics';
   document.querySelectorAll('.view-tab').forEach((tab) => {
-    const active = tab.dataset.view === (live ? 'live-ai' : 'operations');
+    const active = tab.dataset.view === current;
     tab.classList.toggle('active', active);
     tab.setAttribute('aria-selected', String(active));
   });
   syncStreams();
+  document.dispatchEvent(new CustomEvent('viewchange', { detail: { view: current } }));
 }
 
 // ------------------------------------------------------------------- init

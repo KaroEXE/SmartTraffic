@@ -5,6 +5,9 @@
  * dashboard says so instead of showing a number.
  */
 
+import { trafficSummary, positionLabel } from './metrics.js';
+import { streamRows } from './streamStatus.js';
+
 const DIRS = ['north', 'south', 'east', 'west'];
 const TYPE_LABEL = { ambulance: 'AMBULANCE', police: 'POLICE', fire_truck: 'FIRE TRUCK', emergency: 'EMERGENCY VEHICLE' };
 const isNum = (n) => typeof n === 'number' && Number.isFinite(n);
@@ -200,7 +203,10 @@ export function setSelected(id, name, snap) {
   setText($('tb-name'), name || id);
   setText($('tb-id'), id);
   setText($('vp-title'), name || id);
-  if (snap) setText($('vp-sub'), `${id}  ·  ${snap.lat.toFixed(4)}, ${snap.lng.toFixed(4)}`);
+  if (snap) {
+    const where = positionLabel(snap);
+    setText($('vp-sub'), `${id}  ·  ${snap.lat.toFixed(4)}, ${snap.lng.toFixed(4)}${where ? `  ·  ${where}` : ''}`);
+  }
   setText($('ev-scope'), scopeLabel(name || id));
 }
 
@@ -445,6 +451,43 @@ function renderSystemData(s) {
   }
   setText($('sys-last'), s.lastUpdate ? formatTime(s.lastUpdate) : 'never');
   setText($('sys-count'), String(s.updatesReceived));
+
+  // Estimated congestion: only from data the controller is actually using.
+  const summary = trafficSummary(s);
+  const cg = $('sys-congestion');
+  setText(cg, summary.label);
+  cg.className = `cg-text cg-${summary.level}`;
+  setText($('sys-queued'), summary.queued === null ? '--' : `${summary.queued} veh · max ${summary.maxWait} s`);
+}
+
+/**
+ * Camera streams of the selected intersection (live mode only), from
+ * GET /api/streams/status and the socket's `streamStatus`. Health comes from
+ * the AI service's reports; an old report is shown as stale.
+ *   registry  { loading, error, status }
+ */
+export function renderCameras(registry, intersectionId, mode, nowMs = Date.now()) {
+  const list = $('cam-list');
+  const meta = $('cam-meta');
+  if (!list) return;
+  if (mode !== 'live') {
+    setText(meta, '');
+    list.innerHTML = '<div class="emergency-none">Camera streams are not used in Simulation mode.</div>';
+    return;
+  }
+  const view = streamRows(registry, intersectionId, nowMs);
+  setText(meta, view.state === 'ok' ? `${view.rows.length} registered` : '');
+  if (view.state !== 'ok') {
+    list.innerHTML = `<div class="emergency-none">${escapeHtml(view.message)}</div>`;
+    return;
+  }
+  list.innerHTML = view.rows.map((r) => `
+    <div class="cam-row st-${escapeHtml(r.state)}">
+      <span class="cam-dir">${escapeHtml(r.stream.direction ? r.stream.direction.toUpperCase() : 'ALL')}</span>
+      <span class="cam-name" title="${escapeHtml(r.stream.host || '')}">${escapeHtml(r.stream.name)}</span>
+      <span class="cam-state">${escapeHtml(r.label)}</span>
+      <span class="cam-detail">${escapeHtml(r.detail)}</span>
+    </div>`).join('');
 }
 
 // ------------------------------------------------------------- system bar
