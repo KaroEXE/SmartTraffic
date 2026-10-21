@@ -56,6 +56,13 @@ const config = {
   // POST /api/traffic. Empty = ingestion is open (local development only).
   // Never log this value.
   trafficIngestToken: (process.env.TRAFFIC_INGEST_TOKEN || '').trim(),
+  // Bearer token for camera stream management (POST/PATCH/DELETE
+  // /api/streams). Empty = stream management is disabled. Never log it.
+  streamAdminToken: (process.env.STREAM_ADMIN_TOKEN || '').trim(),
+  // History sampling: at most one stored traffic record per intersection per
+  // this many seconds of capture time (0 = store every observation). Changes
+  // in emergency, pedestrians or stream attribution are always stored.
+  historySampleSeconds: Math.max(0, num('HISTORY_SAMPLE_SECONDS', 5)),
 
   weights: {
     vehicles: num('WEIGHT_VEHICLES', 2),
@@ -81,6 +88,30 @@ const config = {
   },
 
   EMERGENCY_CONFIDENCE_THRESHOLD: num('EMERGENCY_CONFIDENCE_THRESHOLD', 0.8),
+
+  // Network-wide coordination (services/networkCoordinator.js) and the
+  // emergency corridor (services/emergencyCorridor.js).
+  network: {
+    ENABLED: (process.env.NETWORK_OPTIMIZATION || 'true').trim().toLowerCase() !== 'false',
+    DECISION_INTERVAL: num('NETWORK_DECISION_INTERVAL', 2), // s between coordinator cycles
+    LINK_LENGTH_M: num('NETWORK_LINK_LENGTH_M', 200),
+    LINK_CAPACITY_VEHICLES: num('NETWORK_LINK_CAPACITY', 40),
+    SPILLBACK_START: num('NETWORK_SPILLBACK_START', 0.7), // downstream occupancy where release is reduced
+    SPILLBACK_BLOCK: num('NETWORK_SPILLBACK_BLOCK', 0.9), // ... and where it stops
+    DOWNSTREAM_WEIGHT: num('NETWORK_DOWNSTREAM_WEIGHT', 0.5),
+    LOOKAHEAD_RELEASE_SHARE: num('NETWORK_LOOKAHEAD_RELEASE_SHARE', 0.3),
+    UPSTREAM_WEIGHT: num('NETWORK_UPSTREAM_WEIGHT', 2),
+    SATURATION_FLOW: num('NETWORK_SATURATION_FLOW', 1.35), // veh/s released on green
+    BLOCKED_CYCLES: num('NETWORK_BLOCKED_CYCLES', 2), // cycles a green's exit must stay blocked before it is cut
+    CORRIDOR_LENGTH: num('EMERGENCY_CORRIDOR_LENGTH', 3), // intersections prepared ahead of an emergency vehicle
+    CORRIDOR_PREPARE_SECONDS: num('EMERGENCY_CORRIDOR_PREPARE_SECONDS', 30),
+    CORRIDOR_HOLD_SECONDS: num('EMERGENCY_CORRIDOR_HOLD_SECONDS', 8),
+    CORRIDOR_NOMINAL_SPEED: num('EMERGENCY_CORRIDOR_NOMINAL_SPEED', 12), // m/s when the vehicle's speed is unknown
+    CORRIDOR_TRACK_TIMEOUT: num('EMERGENCY_CORRIDOR_TRACK_TIMEOUT', 10), // s without an update before a track is dropped
+    // A camera-detected emergency vehicle also prepares the next intersections
+    // straight ahead (route assumed: there is no GPS feed).
+    CORRIDOR_FROM_CAMERA: (process.env.EMERGENCY_CORRIDOR_FROM_CAMERA || 'true').trim().toLowerCase() !== 'false',
+  },
 };
 
 if (config.timing.MIN_GREEN_TIME > config.timing.MAX_GREEN_TIME) {

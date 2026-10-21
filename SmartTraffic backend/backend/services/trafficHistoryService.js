@@ -7,8 +7,14 @@ const { DIRECTIONS, DATA_MODES, modeFilter } = require('../models/constants');
  * Traffic History - writes historical data to MongoDB. Read-only towards the
  * rest of the backend: it only listens to events that already exist.
  *
- *   trafficStateService 'stateUpdated'  -> TrafficRecord  (every accepted observation)
+ *   trafficStateService 'stateUpdated'  -> TrafficRecord  (sampled, see below)
  *   decisionService     'signalUpdate'  -> SignalEvent    (every phase change)
+ *
+ * Sampling: the AI service reports about once a second. At most one traffic
+ * record is stored per intersection per `sampleIntervalMs` of capture time
+ * (0 = every observation). An observation whose emergency detection,
+ * pedestrian requests or stream attribution differs from the previous one
+ * is stored at once, so no event is lost to sampling.
  *
  * One instance per data channel: `dataMode` ('live' or 'simulation') is
  * stamped on everything the instance writes. It comes from server wiring,
@@ -50,6 +56,7 @@ class TrafficHistoryService {
     isConnected = isDatabaseConnected,
     log = console,
     dataMode = 'live',
+    sampleIntervalMs = 0,
   }) {
     if (!DATA_MODES.includes(dataMode)) throw new RangeError(`Unknown data mode "${dataMode}"`);
     this.dataMode = dataMode;
@@ -59,11 +66,14 @@ class TrafficHistoryService {
     this.SignalEvent = SignalEvent;
     this.isConnected = isConnected;
     this.log = log;
+    this.sampleIntervalMs = Math.max(0, Number(sampleIntervalMs) || 0);
 
     this.lastPhase = new Map(); // intersectionId -> { phase, signals, pedestrianSignals, startedAt }
     this.lastCaptureTime = new Map(); // intersectionId -> producer timestamp of the last record
+    this.lastStoredAt = new Map(); // intersectionId -> capture time (ms) of the last stored record
+    this.lastEventKey = new Map(); // intersectionId -> emergency / pedestrians / streams of the last observation
     this.warnings = new Map(); // key -> { at, suppressed }
-    this.counts = { trafficRecordsSaved: 0, signalEventsSaved: 0, notSaved: 0 };
+    this.counts = { trafficRecordsSaved: 0, signalEventsSaved: 0, notSaved: 0, sampledOut: 0 };
     this.pending = new Set();
 
     this.onState = (state) => this.recordObservation(state);
@@ -89,6 +99,8 @@ class TrafficHistoryService {
   resetTracking() {
     this.lastPhase.clear();
     this.lastCaptureTime.clear();
+    this.lastStoredAt.clear();
+    this.lastEventKey.clear();
   }
 
   // ----------------------------------------------------------------- queries
@@ -96,6 +108,22 @@ class TrafficHistoryService {
   /** Newest-first traffic observations of ONE mode (default live). */
   findTrafficRecords(options) {
     return this._find(this.TrafficRecord, options);
+  }
+
+  /**
+   * The newest stored traffic record of one intersection (live mode), or
+   * null - e.g. after a restart, when the in-memory latest state is empty.
+   * Never throws: no database means no record.
+   */
+  async findLatestTrafficRecord(intersectionId) {
+    if (!this.isConnected()) return null;
+    try {
+      const [record] = await this._find(this.TrafficRecord, { mode: this.dataMode, intersectionId, limit: 1 });
+      return record || null;
+    } catch (err) {
+      this._warn('latest', `Latest traffic record could not be read: ${err && err.message}`);
+      return null;
+    }
   }
 
   /** Newest-first signal phase changes of ONE mode (default live). */
@@ -137,8 +165,21 @@ class TrafficHistoryService {
     if (state.timestamp && this.lastCaptureTime.get(state.intersectionId) === state.timestamp) return null;
     if (state.timestamp) this.lastCaptureTime.set(state.intersectionId, state.timestamp);
 
+    const id = state.intersectionId;
+    const captured = Date.parse(state.timestamp || state.receivedAt);
+    const eventKey = JSON.stringify([state.emergency, state.pedestrians, state.streams || null]);
+    const changed = this.lastEventKey.has(id) && this.lastEventKey.get(id) !== eventKey;
+    this.lastEventKey.set(id, eventKey);
+    const last = this.lastStoredAt.get(id);
+    if (!changed && last !== undefined && this.sampleIntervalMs > 0
+      && captured >= last && captured - last < this.sampleIntervalMs) {
+      this.counts.sampledOut += 1;
+      return null;
+    }
+
     const snap = this.decisionService.getSnapshot(state.intersectionId);
     if (!snap) return null;
+    this.lastStoredAt.set(id, captured);
     return this._save(this.TrafficRecord, 'trafficRecordsSaved', 'Traffic record', {
       dataMode: this.dataMode,
       intersectionId: state.intersectionId,
@@ -151,6 +192,7 @@ class TrafficHistoryService {
         : null])),
       pedestrians: state.pedestrians,
       emergency: state.emergency,
+      ...(state.streams ? { streams: state.streams } : {}),
       signal: {
         mode: snap.mode,
         phase: snap.phase,

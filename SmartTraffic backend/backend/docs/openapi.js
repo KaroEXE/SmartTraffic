@@ -190,6 +190,21 @@ for (const [prefix, tag, suffix] of [['/api', 'Live traffic', 'Live'], ['/api/si
   operation(prefix + '/traffic/state/{intersectionId}', 'get', tag, 'get' + suffix + 'State', 'Read one snapshot and recent events', ok({ state: ref('Snapshot') }), {
     parameters: [pathId], responses: { 404: error('Unknown intersection') },
   });
+  operation(prefix + '/network', 'get', tag, 'get' + suffix + 'Network', 'Road network topology and the latest network decision', ok({
+    enabled: bool,
+    topology: object({
+      nodes: array(object({ id, name: str, col: { type: 'integer', nullable: true }, row: { type: 'integer', nullable: true } })),
+      links: array(object({
+        id: str, from: id, to: id, heading: direction, approach: direction, lengthM: num, capacity: { type: 'integer' },
+      })),
+      linkLengthM: num, capacity: { type: 'integer' }, schematic: bool,
+    }),
+    decision: { type: 'object', nullable: true, description: 'Latest network coordinator cycle: evaluated intersections, per-approach candidates (local and network scores, downstream state), chosen action and reason, link states and emergency corridors.' },
+    recent: array({ type: 'object' }),
+  }), {
+    description: 'The topology is a configured schematic (grid positions in the intersection config). Decisions come from services/networkCoordinator.js; intersections without fresh data are not optimised.',
+    responses: { 503: error('Network coordination is not configured') },
+  });
 }
 operation('/api/traffic/observations', 'get', 'Live traffic', 'getObservations', 'Read all latest normalized perception observations', ok({ observations: array(ref('Observation')) }));
 operation('/api/traffic/observations/{intersectionId}', 'get', 'Live traffic', 'getObservation', 'Read latest observation for one intersection', ok({ observation: ref('Observation'), ageSeconds: num }), {
@@ -232,6 +247,111 @@ operation('/api/simulation/tour', 'post', 'Simulation', 'setSimulationTour', 'En
   responses: { 400: error('Invalid body'), 404: error('Unknown intersection') },
 });
 
+operation('/api/simulation/network', 'post', 'Simulation', 'setSimulationNetwork', 'Turn network-wide optimisation on or off in the simulation', ref('SimulationStatus'), {
+  requestBody: body(object({ enabled: bool }, ['enabled']), { off: { value: { enabled: false } } }),
+  responses: { 400: error('Invalid body') },
+});
+operation('/api/simulation/ambulance', 'post', 'Simulation', 'dispatchSimulatedAmbulance', 'Send a simulated emergency vehicle through the network', ref('SimulationStatus'), {
+  description: 'SIMULATED vehicle: it starts 150 m before `from` and drives straight on (`heading` = travel direction) or along `route`. Its position is reported to the emergency corridor planner every second, as a GPS feed would.',
+  requestBody: body(object({
+    from: id,
+    heading: { type: 'string', enum: DIRECTIONS },
+    route: array(id),
+    type: { type: 'string', enum: ['ambulance', 'police', 'fire_truck'], default: 'ambulance' },
+  }, ['from']), { eastbound: { value: { from: intersections[0].id, heading: 'east' } } }),
+  responses: { 400: error('Invalid heading or route'), 404: error('Unknown intersection') },
+});
+operation('/api/simulation/ambulance/{id}', 'patch', 'Simulation', 'rerouteSimulatedAmbulance', 'Change a simulated emergency vehicle\'s route', ref('SimulationStatus'), {
+  parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+  requestBody: body(object({ route: array(id) }, ['route'])),
+  responses: { 400: error('Invalid route'), 404: error('No such vehicle') },
+});
+operation('/api/simulation/ambulance/{id}', 'delete', 'Simulation', 'cancelSimulatedAmbulance', 'Remove a simulated emergency vehicle', ref('SimulationStatus'), {
+  parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+  responses: { 404: error('No such vehicle') },
+});
+
+const metrics = object({
+  averageWaitSeconds: { type: 'number', nullable: true, description: 'Mean delay per vehicle (s); vehicles still queued at the end count with their wait so far.' },
+  maxWaitSeconds: { type: 'number', nullable: true, description: 'Longest single delay (s).' },
+  totalWaitVehicleHours: { type: 'number', description: 'Time spent queued by all vehicles (vehicle-hours).' },
+  averageQueue: { type: 'number', nullable: true, description: 'Mean queued vehicles per approach.' },
+  maxQueue: { type: 'integer', description: 'Longest queue on any approach (vehicles).' },
+  throughputVehicles: { type: 'integer', description: 'Vehicles served in the measurement window.' },
+  throughputPerHour: { type: 'number', nullable: true },
+  stillQueued: { type: 'integer' },
+  vehiclesEntered: { type: 'integer' },
+  spillbackSeconds: { type: 'integer', description: 'Approach-seconds of green that could not release because the road ahead was full.' },
+  spillbackIncidents: { type: 'integer', description: 'Times a green approach became blocked by a full road ahead.' },
+  clearSeconds: { type: 'number', nullable: true, description: 'Surge profile: seconds after the surge until queues were back to their pre-surge level (null if not within the run).' },
+  emergencyStops: { type: 'integer', nullable: true },
+  emergencyDelaySeconds: { type: 'number', nullable: true },
+});
+const improvement = object(Object.fromEntries(['averageWaitSeconds', 'maxWaitSeconds', 'totalWaitVehicleHours', 'averageQueue', 'maxQueue',
+  'throughputVehicles', 'spillbackSeconds', 'spillbackIncidents', 'clearSeconds', 'emergencyStops', 'emergencyDelaySeconds']
+  .map((k) => [k, { type: 'number', nullable: true, description: 'Percent; null when the baseline is 0 or missing.' }])));
+const policyRun = object({
+  policy: { type: 'string', enum: ['fixed', 'local', 'network'] }, controllerModes: array(str), network: metrics,
+  perIntersection: { type: 'object' }, emergency: { type: 'object', nullable: true }, decisionsMade: { type: 'integer' }, series: array({ type: 'object' }),
+});
+const benchmarkResult = object({
+  dataMode: { type: 'string', enum: ['simulation'] }, label: str, generatedAt: date, runtimeMs: num,
+  parameters: { type: 'object' }, method: { type: 'object' },
+  policies: object({ fixed: policyRun, local: policyRun, network: policyRun }),
+  improvementPercent: object({ networkVsLocal: improvement, networkVsFixed: improvement, localVsFixed: improvement }),
+  perIntersection: array({ type: 'object' }),
+});
+operation('/api/simulation/benchmark', 'post', 'Simulation', 'runSimulationBenchmark', 'Compare fixed-time, per-intersection adaptive and network-aware control on identical simulated demand', ok({ benchmark: benchmarkResult }), {
+  description: 'Runs the decision engine three times on the same seeded simulated network demand: without observations (fixed-time plan), with observations (each intersection decides alone), and with observations plus the network coordinator. Improvement = (baseline - optimized) / baseline x 100, or (optimized - baseline) / baseline x 100 for throughput. Simulated - not a real-world measurement. Independent of the running simulation.',
+  requestBody: body(object({
+    scenario: { type: 'string', enum: SCENARIOS.map((s) => s.id), default: 'normal' },
+    durationSeconds: { type: 'integer', minimum: 120, maximum: 1800, default: 900 },
+    warmupSeconds: { type: 'integer', minimum: 0, maximum: 600, default: 60 },
+    sampleEverySeconds: { type: 'integer', minimum: 5, maximum: 120, default: 15 },
+    seed: { type: 'integer', minimum: 0, default: 1 },
+    profile: { type: 'string', enum: ['steady', 'surge'], default: 'steady' },
+    ambulance: { type: 'boolean', default: false, description: 'Send one simulated ambulance along the longest straight route.' },
+    intersectionIds: array(id),
+  }), { normal: { value: { scenario: 'normal', durationSeconds: 900, seed: 1, profile: 'surge', ambulance: true } } }),
+  responses: { 400: error('Invalid benchmark parameters'), 409: error('A benchmark is already running'), 500: error('Benchmark failed') },
+});
+operation('/api/simulation/benchmark', 'get', 'Simulation', 'getSimulationBenchmark', 'Read the latest benchmark result (null before the first run)', ok({
+  benchmark: { ...benchmarkResult, nullable: true },
+}));
+
+const streamId = { name: 'id', in: 'path', required: true, schema: { type: 'string', pattern: ID_PATTERN.source } };
+const streamRecord = object({
+  id: str, name: str, url: str, sourceType: { type: 'string', enum: ['youtube', 'hls', 'http', 'rtsp', 'file', 'camera'] },
+  intersectionId: id, direction, enabled: bool, priority: { type: 'integer' },
+  status: str, active: bool, stale: bool, lastHealthCheckAt: nullableDate, lastFrameAt: nullableDate, lastInferenceAt: nullableDate,
+  consecutiveFailures: { type: 'integer' }, lastError: { type: 'string', nullable: true }, createdAt: nullableDate, updatedAt: nullableDate,
+});
+const streamAuth = 'Requires the ingest or admin token as "Authorization: Bearer <token>" (open when TRAFFIC_INGEST_TOKEN is not set). See docs/python-integration-contract.md.';
+const adminAuth = 'Requires STREAM_ADMIN_TOKEN as "Authorization: Bearer <token>"; disabled (503) when it is not set.';
+operation('/api/streams', 'get', 'Streams', 'listStreams', 'List registered camera streams (with URLs)', ok({ count: { type: 'integer' }, streams: array(streamRecord) }), {
+  description: streamAuth,
+  parameters: [{ name: 'enabled', in: 'query', schema: { type: 'string', enum: ['true', 'false'] } }, { name: 'intersectionId', in: 'query', schema: id }],
+  responses: { 400: error('Invalid query'), 401: error('Missing or invalid token'), 503: error('Database not connected') },
+});
+operation('/api/streams', 'post', 'Streams', 'createStream', 'Register a camera stream', ok({ stream: streamRecord }), {
+  description: adminAuth, responses: { 400: error('Invalid stream'), 401: error('Missing or invalid token'), 409: error('Duplicate'), 503: error('Disabled or database not connected') },
+});
+operation('/api/streams/status', 'get', 'Streams', 'getStreamStatus', 'Public camera stream health (no URLs)', ok({
+  available: bool, serverTime: date, staleAfterSeconds: num, streams: array({ type: 'object' }),
+}));
+operation('/api/streams/health', 'post', 'Streams', 'reportStreamHealth', 'AI service camera health report', ok({
+  updated: { type: 'integer' }, ignored: array({ type: 'object' }), rejected: array({ type: 'object' }), persisted: bool,
+}), { description: streamAuth, responses: { 400: error('Malformed report'), 401: error('Missing or invalid token') } });
+for (const [method, opId, summary, auth] of [
+  ['get', 'getStream', 'Read one camera stream', streamAuth],
+  ['patch', 'updateStream', 'Change stream settings or enable / disable it', adminAuth],
+  ['delete', 'deleteStream', 'Remove a camera stream', adminAuth],
+]) {
+  operation('/api/streams/{id}', method, 'Streams', opId, summary, ok({ stream: streamRecord }), {
+    description: auth, parameters: [streamId], responses: { 401: error('Missing or invalid token'), 404: error('Unknown stream') },
+  });
+}
+
 module.exports = {
   openapi: '3.0.3',
   info: {
@@ -244,6 +364,7 @@ module.exports = {
     { name: 'System', description: 'Health and public configuration.' },
     { name: 'History', description: 'MongoDB observations and signal changes, filtered by data mode.' },
     { name: 'Simulation', description: 'Isolated simulated traffic and scenario controls.' },
+    { name: 'Streams', description: 'Camera stream registry and health (live channel).' },
   ],
   paths, components: { schemas },
 };

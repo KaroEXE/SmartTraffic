@@ -6,14 +6,18 @@ const cors = require('cors');
 const config = require('./config');
 const intersections = require('./config/intersections');
 const simulationIntersections = require('./config/simulationIntersections');
-const { connectDatabase, disconnectDatabase, getDatabaseStatus } = require('./config/database');
+const { connectDatabase, disconnectDatabase, getDatabaseStatus, isDatabaseConnected } = require('./config/database');
 const { createTrafficDecisionService } = require('./services/trafficDecisionService');
 const { trafficStateService } = require('./services/trafficStateService');
 const { createTrafficHistoryService } = require('./services/trafficHistoryService');
 const { createSimulationService } = require('./services/simulationService');
+const { createStreamRegistryService } = require('./services/streamRegistryService');
+const { buildTopology } = require('./services/networkTopology');
+const { createNetworkCoordinator } = require('./services/networkCoordinator');
 const { createTrafficController } = require('./controllers/trafficController');
 const { createSimulationController } = require('./controllers/simulationController');
-const { createTrafficRoutes, createSimulationRoutes } = require('./routes/trafficRoutes');
+const { createStreamController } = require('./controllers/streamController');
+const { createTrafficRoutes, createSimulationRoutes, createStreamRoutes } = require('./routes/trafficRoutes');
 const { createDocsRoutes } = require('./routes/docsRoutes');
 const { initTrafficSocket } = require('./socket/trafficSocket');
 
@@ -30,6 +34,19 @@ const server = http.createServer(app);
 // -> decision engine `service` -> Socket.IO room "live". Only real data.
 const service = createTrafficDecisionService({ intersections, config });
 
+// LIVE network coordination: network-aware scores for every intersection
+// with fresh AI data, and emergency corridors from camera detections
+// (route assumed straight ahead - there is no GPS feed). Intersections
+// without data keep their own fixed-time plan.
+const network = createNetworkCoordinator({
+  engine: service,
+  topology: buildTopology(intersections, config.network),
+  config,
+  dataMode: 'live',
+  enabled: config.network.ENABLED,
+  cameraCorridors: config.network.CORRIDOR_FROM_CAMERA,
+});
+
 // SIMULATION channel (the dashboard's Simulation tab): its own generator,
 // engine, store and intersection list, idle until started from the
 // dashboard. Shares nothing with the live objects above, and nothing it
@@ -38,16 +55,29 @@ const simulation = createSimulationService({ intersections: simulationIntersecti
 
 // Historical data (MongoDB). Signal control does not depend on it. One
 // instance per channel; each stamps its own dataMode on what it writes.
+const sampleIntervalMs = config.historySampleSeconds * 1000;
 const history = config.mongodbUri
-  ? createTrafficHistoryService({ stateService: trafficStateService, decisionService: service, dataMode: 'live' }).start()
+  ? createTrafficHistoryService({
+    stateService: trafficStateService, decisionService: service, dataMode: 'live', sampleIntervalMs,
+  }).start()
   : null;
 const simulationHistory = config.mongodbUri
   ? createTrafficHistoryService({
-    stateService: simulation.stateService, decisionService: simulation.engine, dataMode: 'simulation',
+    stateService: simulation.stateService, decisionService: simulation.engine, dataMode: 'simulation', sampleIntervalMs,
   }).start()
   : null;
 if (simulationHistory) simulation.on('reset', () => simulationHistory.resetTracking());
 connectDatabase(config.mongodbUri);
+
+// Camera stream registry (MongoDB). Live channel only. Reloaded every 30 s
+// while the database is connected, so the dashboard's camera status and
+// ingestion's attribution check use the current configuration.
+const streams = createStreamRegistryService();
+const refreshStreams = () => {
+  if (isDatabaseConnected()) streams.refresh().catch(() => {});
+};
+setInterval(refreshStreams, 30_000).unref();
+setTimeout(refreshStreams, 2_000).unref();
 
 const controller = createTrafficController(service, {
   history,
@@ -57,8 +87,12 @@ const controller = createTrafficController(service, {
     ...(simulationHistory ? { simulation: simulationHistory.stats() } : {}),
   }),
   ingestToken: config.trafficIngestToken,
+  streamRegistry: streams,
+  network,
 });
-const simulationReadController = createTrafficController(simulation.engine, { stateService: simulation.stateService });
+const simulationReadController = createTrafficController(simulation.engine, {
+  stateService: simulation.stateService, network: simulation.coordinator,
+});
 if (!config.trafficIngestToken) {
   console.warn('[server] TRAFFIC_INGEST_TOKEN is not set: anyone who can reach POST /api/traffic can post traffic data. Set it (and the same value on the AI service) in production.');
 }
@@ -73,6 +107,13 @@ app.get('/api/client-config', (req, res) => {
 
 app.use('/api', createDocsRoutes());
 
+app.use('/api/streams', createStreamRoutes(
+  createStreamController(streams, {
+    hasIntersection: (id) => service.has(id),
+    secrets: [config.trafficIngestToken, config.streamAdminToken],
+  }),
+  { ingestToken: config.trafficIngestToken, adminToken: config.streamAdminToken },
+));
 app.use('/api/simulation', createSimulationRoutes(simulationReadController, createSimulationController(simulation)));
 app.use('/api', createTrafficRoutes(controller));
 app.use('/api', (req, res) => res.status(404).json({ ok: false, error: `No route ${req.method} ${req.originalUrl}` }));
@@ -95,8 +136,11 @@ app.use((err, req, res, next) => {
   return res.status(500).json({ ok: false, error: 'Internal server error' });
 });
 
-initTrafficSocket(server, service, { corsOrigin: config.corsOrigin, simulation });
+initTrafficSocket(server, service, {
+  corsOrigin: config.corsOrigin, simulation, streams, network,
+});
 service.start(250);
+network.start();
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
@@ -119,6 +163,7 @@ server.listen(config.port, () => {
 
 async function shutdown() {
   service.stop();
+  network.stop();
   simulation.pause();
   if (history) history.stop();
   if (simulationHistory) simulationHistory.stop();

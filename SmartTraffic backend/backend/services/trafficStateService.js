@@ -23,7 +23,8 @@ const EventEmitter = require('events');
  *                                       // null = the producer has no source for that approach
  *     pedestrians: { north, south, east, west },   // booleans
  *     emergency: { detected, type, direction, confidence },
- *     detectors: { pedestrians, emergency }        // which detectors reported
+ *     detectors: { pedestrians, emergency },       // which detectors reported
+ *     streams: { north: streamId, ... } | null     // verified camera attribution, if any
  *   }
  */
 
@@ -78,6 +79,7 @@ class TrafficStateService extends EventEmitter {
       pedestrians: clone(observation.pedestrians),
       emergency: clone(observation.emergency),
       detectors: clone(observation.detectors || { pedestrians: false, emergency: false }),
+      streams: observation.streams ? clone(observation.streams) : null,
     };
     // Replaces the previous entry: one state per intersection, never duplicates.
     this.states.set(id, { ...state, _receivedMs: now });

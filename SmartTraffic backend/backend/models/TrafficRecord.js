@@ -22,6 +22,13 @@ const approach = new Schema({
   waitingTime: { type: Number, required: true, min: 0, max: LIMITS.waitingTime }, // seconds
 }, { _id: false });
 
+// Which registered camera stream (TrafficStream id) measured each approach;
+// null = not attributed. Only set when the AI service sent attribution and
+// the stream registry verified it.
+const streamAttribution = new Schema(perDirection(() => ({
+  type: String, default: null, match: /^[A-Za-z0-9_-]{1,64}$/,
+})), { _id: false });
+
 const trafficRecordSchema = new Schema({
   intersectionId: { type: String, required: true, match: /^[A-Za-z0-9_-]{1,64}$/ },
   // 'live' = real perception data. 'simulation' only appears on rows written
@@ -38,6 +45,8 @@ const trafficRecordSchema = new Schema({
   traffic: perDirection(() => ({ type: approach, default: null })),
   // true = people waiting to cross that leg (the feed has no pedestrian counts).
   pedestrians: perDirection(() => ({ type: Boolean, required: true })),
+  // Absent on records without attribution (never invented).
+  streams: { type: streamAttribution, default: undefined },
   emergency: {
     detected: { type: Boolean, required: true },
     type: { type: String, enum: EMERGENCY_TYPES, default: null },

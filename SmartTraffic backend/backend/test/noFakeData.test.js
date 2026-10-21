@@ -33,6 +33,7 @@ const SIMULATOR = 'backend/services/simulationService.js';
 const MAY_LOAD_SIMULATION = new Set([
   'backend/server.js', // wiring: separate engine, store, routes and socket room
   'backend/controllers/simulationController.js',
+  'backend/services/simulationBenchmark.js', // fixed-time vs adaptive on the simulator's demand model
   'backend/docs/openapi.js', // lists the scenario ids
   'frontend/app.js', // the dashboard's mode switch
 ]);
@@ -52,6 +53,9 @@ test('live views never import simulation code', () => {
   const live = ['frontend/liveAI.js', 'frontend/dashboard.js', 'frontend/map.js',
     'frontend/three/scene.js', 'frontend/three/vehicles.js', 'frontend/three/pedestrians.js',
     'frontend/three/trafficLights.js', 'frontend/three/intersection.js',
+    'frontend/three/network.js', 'frontend/three/site.js', 'frontend/metrics.js', 'frontend/streamStatus.js',
+    'frontend/three/networkView.js', 'frontend/three/networkOverlay.js', 'frontend/decisionPanel.js',
+    'backend/services/networkTopology.js', 'backend/services/networkCoordinator.js', 'backend/services/emergencyCorridor.js',
     'backend/controllers/trafficController.js', 'backend/services/trafficDecisionService.js',
     'backend/services/trafficStateService.js', 'backend/utils/validation.js'];
   for (const f of live) {
@@ -64,6 +68,22 @@ test('no sample data or mock client in the runtime tree', () => {
   assert.equal(fs.existsSync(path.join(ROOT, 'backend/utils/sampleTraffic.json')), false);
 });
 
-test('the live channel manages only the intersection the AI service reports', () => {
-  assert.deepEqual(require('../config/intersections').map((i) => i.id), ['main']);
+test('the live channel manages exactly the contract intersections, and none starts with data', () => {
+  // docs/python-integration-contract.md: the ids the AI service may report.
+  const live = require('../config/intersections');
+  assert.deepEqual(live.map((i) => i.id), ['main', 'university-road', 'market-square', 'hospital-junction', 'ring-road-north']);
+  // Unsurveyed positions are flagged, never presented as the real junction.
+  for (const i of live) assert.ok(['surveyed', 'placeholder'].includes(i.positionSource), i.id);
+  assert.ok(live.filter((i) => i.id !== 'main').every((i) => i.positionSource === 'placeholder'));
+
+  // An intersection without an AI feed has no numbers: no counts, WAITING.
+  const { createTrafficDecisionService } = require('../services/trafficDecisionService');
+  const engine = createTrafficDecisionService({ intersections: live, config: require('../config') });
+  for (const snap of engine.getAllSnapshots()) {
+    assert.equal(snap.aiStatus, 'WAITING', snap.intersectionId);
+    for (const t of Object.values(snap.traffic)) {
+      assert.equal(t.available, false);
+      assert.equal(t.vehicles, null, `${snap.intersectionId}: no invented counts`);
+    }
+  }
 });

@@ -152,6 +152,33 @@ function validatePedestrians(errors, pedestrians) {
   return out;
 }
 
+/**
+ * Optional stream attribution: { direction: streamId | null }. Null entries
+ * are dropped; an empty result is null (no attribution). Whether the ids
+ * exist and fit this intersection is checked against the stream registry by
+ * the controller, not here.
+ */
+function validateStreams(errors, streams) {
+  if (isMissing(streams)) return null;
+  if (!isPlainObject(streams)) {
+    errors.push('streams must be an object mapping directions to stream ids');
+    return null;
+  }
+  const out = {};
+  for (const [dir, id] of Object.entries(streams)) {
+    if (!DIRECTIONS.includes(dir)) {
+      errors.push(`streams.${dir} is not a valid direction (use ${DIRECTIONS.join(', ')})`);
+    } else if (id === null) {
+      // no stream for this approach
+    } else if (typeof id !== 'string' || !ID_PATTERN.test(id)) {
+      errors.push(`streams.${dir} must be a stream id (1-64 characters [A-Za-z0-9_-]) or null`);
+    } else {
+      out[dir] = id;
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 function validateEmergency(errors, warnings, emergency) {
   const out = { detected: false, type: null, direction: null, confidence: 0 };
   if (isMissing(emergency)) return out;
@@ -235,6 +262,7 @@ function validateObservation(body) {
   const traffic = validateTraffic(errors, body.traffic);
   const pedestrians = validatePedestrians(errors, body.pedestrians);
   const emergency = validateEmergency(errors, warnings, body.emergency);
+  const streams = validateStreams(errors, body.streams);
 
   if (errors.length) return { ok: false, errors };
   // Which detectors the producer actually ran. An omitted `pedestrians` or
@@ -244,7 +272,9 @@ function validateObservation(body) {
   return {
     ok: true,
     warnings,
-    value: { intersectionId, timestamp, source, traffic, pedestrians, emergency, detectors },
+    value: {
+      intersectionId, timestamp, source, traffic, pedestrians, emergency, detectors, streams,
+    },
   };
 }
 

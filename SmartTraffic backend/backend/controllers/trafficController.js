@@ -41,6 +41,12 @@ function parseHistoryQuery(query) {
  * it as a Bearer token, and the reserved producer tags "mock" and
  * "simulation" are always rejected (the simulator feeds its own engine
  * directly). The same read handlers also serve /api/simulation.
+ *
+ * Stream attribution (optional `streams` in the payload): every id must be a
+ * registered stream of this intersection and approach (streamRegistry), or
+ * the whole observation is rejected with 422 before anything is stored. If
+ * the registry is unavailable (no database) the observation is accepted and
+ * the unverified attribution is dropped, with a warning.
  */
 function createTrafficController(service, {
   startedAt = Date.now(),
@@ -48,6 +54,8 @@ function createTrafficController(service, {
   databaseHealth = null, // () => { status, ... } - historical data store, if configured
   history = null, // trafficHistoryService, if configured (read side only)
   ingestToken = '', // TRAFFIC_INGEST_TOKEN; empty = open (local development)
+  streamRegistry = null, // streamRegistryService, if configured
+  network = null, // networkCoordinator of this channel, if configured
 } = {}) {
   function unknownIntersection(res, id) {
     return res.status(404).json({
@@ -97,6 +105,19 @@ function createTrafficController(service, {
         return unknownIntersection(res, observation.intersectionId);
       }
 
+      const warnings = [...result.warnings];
+      if (observation.streams) {
+        const check = streamRegistry
+          ? streamRegistry.verifyAttribution(observation.intersectionId, observation.streams)
+          : { ok: true, verified: false, errors: [], warnings: ['no stream registry - stream attribution was not verified and is not recorded'] };
+        if (!check.ok) {
+          return res.status(422).json({ ok: false, error: 'Stream attribution rejected', details: check.errors });
+        }
+        warnings.push(...check.warnings);
+        // Unverified attribution is never stored.
+        if (!check.verified) observation.streams = null;
+      }
+
       const stored = stateService.setTrafficState(observation);
       if (!stored.stored) {
         if (stored.reason === 'stale') {
@@ -122,7 +143,7 @@ function createTrafficController(service, {
           timestamp: stored.state.timestamp,
         },
       };
-      if (result.warnings.length) body.warnings = result.warnings;
+      if (warnings.length) body.warnings = warnings;
       if (snap) {
         body.decision = {
           mode: snap.mode,
@@ -154,23 +175,58 @@ function createTrafficController(service, {
       res.json({ ok: true, observations: stateService.getAllTrafficStates() });
     },
 
-    getObservation(req, res) {
+    // Latest observation: from memory, or after a restart the newest stored
+    // record (never replayed into the decision engine).
+    async getObservation(req, res) {
       const { intersectionId } = req.params;
       if (!service.has(intersectionId)) return unknownIntersection(res, intersectionId);
       const observation = stateService.getTrafficState(intersectionId);
-      if (!observation) {
-        return res.status(404).json({
-          ok: false,
-          intersectionId,
-          received: false,
-          error: `No traffic data received yet for "${intersectionId}"`,
+      if (observation) {
+        return res.json({
+          ok: true, from: 'memory', observation, ageSeconds: stateService.getAgeSeconds(intersectionId),
         });
       }
-      return res.json({ ok: true, observation, ageSeconds: stateService.getAgeSeconds(intersectionId) });
+      const record = history ? await history.findLatestTrafficRecord(intersectionId) : null;
+      if (record) {
+        const at = new Date(record.timestamp).getTime();
+        return res.json({
+          ok: true,
+          from: 'database',
+          observation: {
+            intersectionId: record.intersectionId,
+            timestamp: new Date(record.timestamp).toISOString(),
+            receivedAt: record.receivedAt ? new Date(record.receivedAt).toISOString() : null,
+            source: record.source || null,
+            traffic: record.traffic,
+            pedestrians: record.pedestrians,
+            emergency: record.emergency,
+            streams: record.streams || null,
+          },
+          ageSeconds: Math.max(0, Math.round((Date.now() - at) / 100) / 10),
+        });
+      }
+      return res.status(404).json({
+        ok: false,
+        intersectionId,
+        received: false,
+        error: `No traffic data received yet for "${intersectionId}"`,
+      });
     },
 
     getIntersections(req, res) {
       res.json({ ok: true, intersections: service.listIntersections() });
+    },
+
+    // Road network topology and the latest network decision cycle.
+    getNetwork(req, res) {
+      if (!network) return res.status(503).json({ ok: false, error: 'Network coordination is not configured' });
+      return res.json({
+        ok: true,
+        enabled: network.enabled,
+        topology: network.topology.toJSON(),
+        decision: network.latest,
+        recent: network.history,
+      });
     },
 
     // Historical data. Always one mode at a time (default "live").

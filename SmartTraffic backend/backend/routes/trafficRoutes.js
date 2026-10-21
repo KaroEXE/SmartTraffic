@@ -1,4 +1,5 @@
 const express = require('express');
+const { requireToken } = require('../utils/auth');
 
 /**
  * mode "live" (default): the full live API, mounted at /api.
@@ -20,6 +21,7 @@ function createTrafficRoutes(controller, { mode = 'live' } = {}) {
   router.get('/traffic/state', controller.getAllStates);
   router.get('/traffic/state/:intersectionId', controller.getState);
   router.get('/intersections', controller.getIntersections);
+  router.get('/network', controller.getNetwork);
 
   return router;
 }
@@ -33,7 +35,41 @@ function createSimulationRoutes(readController, simulationController) {
   router.post('/reset', simulationController.reset);
   router.post('/scenario', simulationController.scenario);
   router.post('/tour', simulationController.tour);
+  router.post('/network', simulationController.network);
+  router.post('/ambulance', simulationController.dispatchAmbulance);
+  router.patch('/ambulance/:id', simulationController.rerouteAmbulance);
+  router.delete('/ambulance/:id', simulationController.cancelAmbulance);
+  router.get('/benchmark', simulationController.latestBenchmark);
+  router.post('/benchmark', simulationController.benchmark);
   return router;
 }
 
-module.exports = { createTrafficRoutes, createSimulationRoutes };
+/**
+ * /api/streams: camera stream registry (controllers/streamController.js).
+ *
+ *   reads + health  ingest or admin token; open when TRAFFIC_INGEST_TOKEN is
+ *                   not set (the same development rule as POST /api/traffic)
+ *   management      admin token only; disabled (503) without STREAM_ADMIN_TOKEN
+ *   /status         public, never contains URLs or tokens
+ */
+function createStreamRoutes(controller, { ingestToken = '', adminToken = '' } = {}) {
+  const router = express.Router();
+  const read = ingestToken
+    ? requireToken([ingestToken, adminToken], { openWhenUnset: true })
+    : (req, res, next) => next();
+  const admin = requireToken(adminToken, {
+    openWhenUnset: false,
+    disabledMessage: 'Stream management is disabled: set STREAM_ADMIN_TOKEN on the backend',
+  });
+
+  router.get('/status', controller.status);
+  router.post('/health', read, controller.health);
+  router.get('/', read, controller.list);
+  router.get('/:id', read, controller.get);
+  router.post('/', admin, controller.create);
+  router.patch('/:id', admin, controller.update);
+  router.delete('/:id', admin, controller.remove);
+  return router;
+}
+
+module.exports = { createTrafficRoutes, createSimulationRoutes, createStreamRoutes };
