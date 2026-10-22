@@ -69,7 +69,7 @@ test('no sample data or mock client in the runtime tree', () => {
 });
 
 test('the live channel manages exactly the contract intersections, and none starts with data', () => {
-  // docs/python-integration-contract.md: the ids the AI service may report.
+  // python/docs/RENDER_DEPLOYMENT.md (integration contract): the ids the AI service may report.
   const live = require('../config/intersections');
   assert.deepEqual(live.map((i) => i.id), ['main', 'university-road', 'market-square', 'hospital-junction', 'ring-road-north']);
   // Unsurveyed positions are flagged, never presented as the real junction.

@@ -56,6 +56,7 @@ function createTrafficController(service, {
   ingestToken = '', // TRAFFIC_INGEST_TOKEN; empty = open (local development)
   streamRegistry = null, // streamRegistryService, if configured
   network = null, // networkCoordinator of this channel, if configured
+  navigationHealth = null, // () => { ... } - mobile navigation API providers, if configured
 } = {}) {
   function unknownIntersection(res, id) {
     return res.status(404).json({
@@ -81,6 +82,7 @@ function createTrafficController(service, {
           tokenRequired: Boolean(ingestToken),
         },
         ...(databaseHealth ? { database: databaseHealth() } : {}),
+        ...(navigationHealth ? { navigation: navigationHealth() } : {}),
       });
     },
 

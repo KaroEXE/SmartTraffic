@@ -19,6 +19,7 @@ const { createSimulationController } = require('./controllers/simulationControll
 const { createStreamController } = require('./controllers/streamController');
 const { createTrafficRoutes, createSimulationRoutes, createStreamRoutes } = require('./routes/trafficRoutes');
 const { createDocsRoutes } = require('./routes/docsRoutes');
+const { createNavigationApi, navigationWarnings } = require('./services/navigation');
 const { initTrafficSocket } = require('./socket/trafficSocket');
 
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
@@ -79,6 +80,11 @@ const refreshStreams = () => {
 setInterval(refreshStreams, 30_000).unref();
 setTimeout(refreshStreams, 2_000).unref();
 
+// MOBILE NAVIGATION API (/api/v1): places, routes, live traffic, road
+// features and community reports for the public navigation app. Reads the
+// LIVE engine only; road features and reports are stored in MongoDB.
+const navigation = createNavigationApi({ config, engine: service });
+
 const controller = createTrafficController(service, {
   history,
   databaseHealth: () => ({
@@ -89,6 +95,7 @@ const controller = createTrafficController(service, {
   ingestToken: config.trafficIngestToken,
   streamRegistry: streams,
   network,
+  navigationHealth: navigation.health,
 });
 const simulationReadController = createTrafficController(simulation.engine, {
   stateService: simulation.stateService, network: simulation.coordinator,
@@ -97,6 +104,9 @@ if (!config.trafficIngestToken) {
   console.warn('[server] TRAFFIC_INGEST_TOKEN is not set: anyone who can reach POST /api/traffic can post traffic data. Set it (and the same value on the AI service) in production.');
 }
 
+app.disable('x-powered-by');
+// Behind a reverse proxy (Render, Nginx) req.ip is the client only with this set.
+app.set('trust proxy', config.trustProxy);
 app.use(cors({ origin: config.corsOrigin }));
 app.use(express.json({ limit: '100kb' }));
 
@@ -106,6 +116,7 @@ app.get('/api/client-config', (req, res) => {
 });
 
 app.use('/api', createDocsRoutes());
+app.use('/api/v1', navigation.router);
 
 app.use('/api/streams', createStreamRoutes(
   createStreamController(streams, {
@@ -116,7 +127,7 @@ app.use('/api/streams', createStreamRoutes(
 ));
 app.use('/api/simulation', createSimulationRoutes(simulationReadController, createSimulationController(simulation)));
 app.use('/api', createTrafficRoutes(controller));
-app.use('/api', (req, res) => res.status(404).json({ ok: false, error: `No route ${req.method} ${req.originalUrl}` }));
+app.use('/api', (req, res) => res.status(404).json({ ok: false, code: 'NOT_FOUND', error: `No route ${req.method} ${req.originalUrl}` }));
 
 // Frontend + its two rendering libraries, served locally so the 3D view
 // works without a CDN (map tiles still come from openstreetmap.org).
@@ -127,13 +138,13 @@ app.use(express.static(FRONTEND_DIR));
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed') {
-    return res.status(400).json({ ok: false, error: 'Malformed JSON body' });
+    return res.status(400).json({ ok: false, code: 'MALFORMED_JSON', error: 'Malformed JSON body' });
   }
   if (err.type === 'entity.too.large') {
-    return res.status(413).json({ ok: false, error: 'Payload too large' });
+    return res.status(413).json({ ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'Payload too large' });
   }
   console.error('[server] unhandled error:', err);
-  return res.status(500).json({ ok: false, error: 'Internal server error' });
+  return res.status(500).json({ ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
 });
 
 initTrafficSocket(server, service, {
@@ -156,9 +167,11 @@ server.listen(config.port, () => {
   console.log(`  Swagger     http://localhost:${config.port}/api/docs/`);
   console.log(`  Dashboard   http://localhost:${config.port}`);
   console.log(`  API         http://localhost:${config.port}/api/health`);
+  console.log(`  Mobile API  http://localhost:${config.port}/api/v1/config`);
   console.log(`  Ingest      POST http://localhost:${config.port}/api/traffic`);
   console.log(`  Intersections: ${service.ids().join(', ')}`);
   console.log('');
+  for (const warning of navigationWarnings(config.navigation)) console.warn(`[navigation] ${warning}`);
 });
 
 async function shutdown() {

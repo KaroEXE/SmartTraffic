@@ -43,6 +43,58 @@ function aiServiceBaseUrl(name) {
   return url.href.replace(/\/+$/, '');
 }
 
+function flag(name, fallback) {
+  const raw = (process.env[name] || '').trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw !== 'false' && raw !== '0' && raw !== 'no';
+}
+
+/**
+ * External navigation provider URL: blank = the public default, "off" =
+ * provider disabled (its endpoints answer 503). Returned without a trailing
+ * slash; null when disabled or invalid.
+ */
+function providerUrl(name, fallback) {
+  const raw = (process.env[name] || '').trim();
+  if (raw.toLowerCase() === 'off') return null;
+  if (!raw) return fallback;
+  const value = httpUrl(name);
+  return value ? value.replace(/\/+$/, '') : null;
+}
+
+/** Hosts whose usage policy allows about one request per second. */
+const PUBLIC_PROVIDER_HOSTS = new Set([
+  'router.project-osrm.org', 'nominatim.openstreetmap.org',
+  'overpass-api.de', 'overpass.private.coffee', 'overpass.kumi.systems',
+]);
+const isPublicProvider = (url) => {
+  try { return PUBLIC_PROVIDER_HOSTS.has(new URL(url).hostname); } catch { return false; }
+};
+/** Minimum spacing between upstream requests: explicit, else 1.1 s for public hosts, 0 for self-hosted. */
+function providerInterval(name, urls) {
+  const list = [].concat(urls).filter(Boolean);
+  return Math.max(0, num(name, list.some(isPublicProvider) ? 1100 : 0));
+}
+
+/** Express "trust proxy": blank = off, true/false, a hop count, or an address list. */
+function trustProxy(raw) {
+  const value = (raw || '').trim();
+  if (!value || value.toLowerCase() === 'false') return false;
+  if (value.toLowerCase() === 'true') return true;
+  if (/^\d+$/.test(value)) return Number(value);
+  return value;
+}
+
+const PACKAGE_VERSION = require('../package.json').version;
+const routingUrl = providerUrl('ROUTING_URL', 'https://router.project-osrm.org');
+const geocodingUrl = providerUrl('GEOCODING_URL', 'https://nominatim.openstreetmap.org');
+const overpassUrls = (process.env.OVERPASS_URLS || '').trim().toLowerCase() === 'off'
+  ? []
+  : ((process.env.OVERPASS_URLS || '').trim()
+    ? process.env.OVERPASS_URLS.split(',').map((u) => u.trim()).filter((u) => /^https?:\/\//i.test(u)).map((u) => u.replace(/\/+$/, ''))
+    : ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter']);
+const contactEmail = (process.env.PROVIDER_CONTACT_EMAIL || '').trim();
+
 const config = {
   port: num('PORT', 3000),
   corsOrigin: process.env.CORS_ORIGIN || '*',
@@ -111,6 +163,112 @@ const config = {
     // A camera-detected emergency vehicle also prepares the next intersections
     // straight ahead (route assumed: there is no GPS feed).
     CORRIDOR_FROM_CAMERA: (process.env.EMERGENCY_CORRIDOR_FROM_CAMERA || 'true').trim().toLowerCase() !== 'false',
+  },
+
+  // Express "trust proxy" (TRUST_PROXY). Set it behind a reverse proxy
+  // (Render, Nginx) so rate limits see the client address, not the proxy's.
+  trustProxy: trustProxy(process.env.TRUST_PROXY),
+
+  // Mobile navigation API (/api/v1). See docs/CONFIGURATION.md.
+  navigation: {
+    // Bearer token for road-feature management and report moderation.
+    // Empty = those endpoints are disabled (503). Never log it, never ship it in an app.
+    adminToken: (process.env.NAV_ADMIN_TOKEN || '').trim(),
+    // HMAC secret that signs device tokens (>= 32 characters). Empty = a
+    // per-process secret: tokens stop working at every restart. Never log it.
+    deviceTokenSecret: (process.env.DEVICE_TOKEN_SECRET || '').trim(),
+    deviceTokenTtlSeconds: Math.max(3600, num('DEVICE_TOKEN_TTL_DAYS', 30) * 86400),
+    // Identifies this backend to the OSM services, as their usage policies require.
+    userAgent: `SmartTraffic-Navigation/${PACKAGE_VERSION}${contactEmail ? ` (${contactEmail})` : ''}`,
+    contactEmail,
+    // Upstream requests queued longer than this are refused (503 PROVIDER_BUSY) instead of waiting.
+    providerMaxWaitMs: Math.max(0, num('PROVIDER_MAX_WAIT_MS', 8000)),
+    // A provider that keeps failing (timeouts, 5xx) is not called for this long:
+    // requests fail at once with 503 PROVIDER_BUSY + Retry-After instead of hanging.
+    providerCooldownMs: Math.max(0, num('PROVIDER_COOLDOWN_SECONDS', 30)) * 1000,
+
+    routing: {
+      url: routingUrl, // OSRM HTTP API; null = routing disabled
+      profile: (process.env.ROUTING_PROFILE || 'driving').trim(),
+      minIntervalMs: providerInterval('ROUTING_MIN_INTERVAL_MS', routingUrl),
+      timeoutMs: Math.max(1000, num('ROUTING_TIMEOUT_MS', 15000)),
+      maxRoutes: 4,
+      // Extra alternatives through via points when OSRM returns fewer than asked
+      // (each attempt = 2 upstream requests), within the time budget.
+      viaAttempts: Math.max(0, Math.round(num('ROUTING_VIA_ATTEMPTS', 4))),
+      alternativesBudgetMs: Math.max(0, num('ROUTING_ALTERNATIVES_BUDGET_MS', 6000)),
+      cacheTtlSeconds: Math.max(0, num('ROUTING_CACHE_TTL_SECONDS', 300)),
+      snapWarningMeters: 300,
+    },
+
+    geocoding: {
+      url: geocodingUrl, // Nominatim-compatible API; null = place search disabled
+      apiKey: (process.env.GEOCODING_API_KEY || '').trim(), // sent as ?key= (e.g. LocationIQ); never log it
+      countryCodes: (process.env.GEOCODING_COUNTRY_CODES || '').trim().toLowerCase(),
+      minIntervalMs: providerInterval('GEOCODING_MIN_INTERVAL_MS', geocodingUrl),
+      timeoutMs: Math.max(1000, num('GEOCODING_TIMEOUT_MS', 10000)),
+      cacheTtlSeconds: Math.max(0, num('GEOCODING_CACHE_TTL_SECONDS', 86400)),
+      localSpanDeg: 0.3, // search near the user first, in a box at least this wide (~33 km)
+    },
+
+    overpass: {
+      urls: overpassUrls, // tried in order; [] = OSM road features and nearby places disabled
+      minIntervalMs: providerInterval('OVERPASS_MIN_INTERVAL_MS', overpassUrls),
+      // Total time for one lookup, shared between the instances tried.
+      timeoutMs: Math.max(1000, num('OVERPASS_TIMEOUT_MS', 12000)),
+      cacheTtlSeconds: Math.max(0, num('OVERPASS_CACHE_TTL_SECONDS', 3600)),
+      tileDeg: 0.05, // road features are cached in tiles of this size (~5.5 km)
+      maxElements: 2000,
+    },
+
+    traffic: {
+      // A live observation older than this is reported as stale.
+      staleAfterSeconds: Math.max(1, num('NAV_TRAFFIC_STALE_SECONDS', 15)),
+      // A monitored intersection is "on the route" within this distance of the line.
+      routeMatchMeters: Math.max(1, num('NAV_ROUTE_MATCH_METERS', 60)),
+      // Delay estimate per approach: mean wait + vehicles x this (one saturation headway).
+      secondsPerVehicle: Math.max(0, num('NAV_SECONDS_PER_VEHICLE', 2)),
+      longQueueVehicles: Math.max(1, num('NAV_LONG_QUEUE_VEHICLES', 10)),
+      // Congestion level thresholds on the estimated delay of an approach.
+      moderateDelaySeconds: Math.max(0, num('NAV_MODERATE_DELAY_SECONDS', 30)),
+      heavyDelaySeconds: Math.max(0, num('NAV_HEAVY_DELAY_SECONDS', 90)),
+      // Placeholder (unsurveyed) intersection positions are not matched to routes
+      // unless this is true: a delay would be attached to the wrong road.
+      includePlaceholderPositions: flag('NAV_ROUTE_INCLUDE_PLACEHOLDERS', false),
+    },
+
+    reports: {
+      // Minutes a report stays visible without confirmations, per type.
+      ttlMinutes: {
+        accident: Math.max(5, num('REPORT_TTL_ACCIDENT_MINUTES', 60)),
+        traffic_jam: Math.max(5, num('REPORT_TTL_TRAFFIC_JAM_MINUTES', 30)),
+        road_closure: Math.max(5, num('REPORT_TTL_ROAD_CLOSURE_MINUTES', 240)),
+        construction: Math.max(5, num('REPORT_TTL_CONSTRUCTION_MINUTES', 1440)),
+        hazard: Math.max(5, num('REPORT_TTL_HAZARD_MINUTES', 120)),
+      },
+      // A confirmation extends a report by its TTL, up to this many TTLs after creation.
+      maxLifetimeFactor: 4,
+      // A new report this close to an active one of the same type confirms it instead.
+      mergeRadiusMeters: Math.max(0, num('REPORT_MERGE_RADIUS_METERS', 75)),
+      // Hidden as "dismissed" at this many dismissals, when they outnumber confirmations.
+      dismissThreshold: Math.max(1, num('REPORT_DISMISS_THRESHOLD', 3)),
+      maxActivePerDevice: Math.max(1, num('REPORT_MAX_ACTIVE_PER_DEVICE', 5)),
+      // Reports are deleted this many days after they stop being active (0 = kept).
+      retentionDays: Math.max(0, num('REPORT_RETENTION_DAYS', 30)),
+      // Reports and closures within this distance of a route line are listed on it.
+      routeAlertMeters: Math.max(1, num('REPORT_ROUTE_ALERT_METERS', 40)),
+    },
+
+    // Per client IP unless noted. Counters are in memory (one backend instance).
+    rateLimits: {
+      perMinute: Math.max(1, num('RATE_LIMIT_PER_MINUTE', 120)),
+      searchPerMinute: Math.max(1, num('RATE_LIMIT_SEARCH_PER_MINUTE', 30)),
+      routesPerMinute: Math.max(1, num('RATE_LIMIT_ROUTES_PER_MINUTE', 20)),
+      placesPerMinute: Math.max(1, num('RATE_LIMIT_PLACES_PER_MINUTE', 20)),
+      deviceRegistrationsPerHour: Math.max(1, num('RATE_LIMIT_DEVICE_REGISTRATIONS_PER_HOUR', 10)),
+      reportsPerHour: Math.max(1, num('RATE_LIMIT_REPORTS_PER_HOUR', 10)), // per device
+      votesPerHour: Math.max(1, num('RATE_LIMIT_VOTES_PER_HOUR', 60)), // per device
+    },
   },
 };
 

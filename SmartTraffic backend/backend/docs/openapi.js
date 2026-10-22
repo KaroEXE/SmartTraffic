@@ -2,6 +2,7 @@ const intersections = require('../config/intersections');
 const { DIRECTIONS, LIMITS, ID_PATTERN } = require('../utils/validation');
 const { MODES, PHASES, VEHICLE_SIGNALS, PEDESTRIAN_SIGNALS } = require('../models/constants');
 const { SCENARIOS } = require('../services/simulationService');
+const navigationSpec = require('./openapiNavigation');
 
 const ref = (name) => ({ $ref: '#/components/schemas/' + name });
 const object = (properties, required = []) => ({ type: 'object', properties, ...(required.length ? { required } : {}) });
@@ -46,6 +47,7 @@ const trafficExample = {
 const schemas = {
   Error: object({
     ok: { type: 'boolean', enum: [false] }, error: str, details: array(str),
+    code: { type: 'string', description: 'Machine-readable code where the handler sets one (NOT_FOUND, MALFORMED_JSON, PAYLOAD_TOO_LARGE, INTERNAL_ERROR); always set on /api/v1 (see NavError).' },
     knownIntersections: array(str), hint: str, intersectionId: id,
     storedTimestamp: nullableDate, received: bool,
   }, ['ok', 'error']),
@@ -169,9 +171,11 @@ operation('/api/health', 'get', 'System', 'getHealth', 'Backend and database hea
   status: str, uptimeSeconds: num, serverTime: date, intersections: { type: 'integer' },
   aiFeeds: object({ connected: { type: 'integer' }, total: { type: 'integer' } }),
   ingestion: object({ intersectionsWithData: { type: 'integer' }, tokenRequired: bool }), database: { type: 'object' },
+  navigation: { type: 'object', description: 'Mobile navigation API: provider status (requests, cache hits, failures, last error code), database, device-token and admin settings.' },
 }));
 operation('/api/client-config', 'get', 'System', 'getClientConfig', 'Public browser configuration', ok({ aiStreamUrl: { type: 'string', nullable: true } }));
 operation('/api/traffic', 'post', 'Live traffic', 'postTraffic', 'Send a perception observation to the live decision engine', ref('IngestionResponse'), {
+  security: [{ ingestToken: [] }],
   description: 'Post about once per second per intersection, using one producer per intersection. All four traffic approaches are required (null for an approach without a source). Directions indicate where vehicles come from. Body limit: 100 KB. When the backend sets TRAFFIC_INGEST_TOKEN, send it as "Authorization: Bearer <token>". Data tagged as simulated is rejected.',
   requestBody: body(ref('TrafficPayload'), {
     normal: { summary: 'Traffic with a pedestrian request', value: trafficExample },
@@ -326,45 +330,62 @@ const streamRecord = object({
   status: str, active: bool, stale: bool, lastHealthCheckAt: nullableDate, lastFrameAt: nullableDate, lastInferenceAt: nullableDate,
   consecutiveFailures: { type: 'integer' }, lastError: { type: 'string', nullable: true }, createdAt: nullableDate, updatedAt: nullableDate,
 });
-const streamAuth = 'Requires the ingest or admin token as "Authorization: Bearer <token>" (open when TRAFFIC_INGEST_TOKEN is not set). See docs/python-integration-contract.md.';
+const streamAuth = 'Requires the ingest or admin token as "Authorization: Bearer <token>" (open when TRAFFIC_INGEST_TOKEN is not set). See python/docs/RENDER_DEPLOYMENT.md (Integration contract).';
+const streamReadSecurity = [{ ingestToken: [] }, { streamAdminToken: [] }];
+const streamAdminSecurity = [{ streamAdminToken: [] }];
 const adminAuth = 'Requires STREAM_ADMIN_TOKEN as "Authorization: Bearer <token>"; disabled (503) when it is not set.';
 operation('/api/streams', 'get', 'Streams', 'listStreams', 'List registered camera streams (with URLs)', ok({ count: { type: 'integer' }, streams: array(streamRecord) }), {
-  description: streamAuth,
+  description: streamAuth, security: streamReadSecurity,
   parameters: [{ name: 'enabled', in: 'query', schema: { type: 'string', enum: ['true', 'false'] } }, { name: 'intersectionId', in: 'query', schema: id }],
   responses: { 400: error('Invalid query'), 401: error('Missing or invalid token'), 503: error('Database not connected') },
 });
 operation('/api/streams', 'post', 'Streams', 'createStream', 'Register a camera stream', ok({ stream: streamRecord }), {
-  description: adminAuth, responses: { 400: error('Invalid stream'), 401: error('Missing or invalid token'), 409: error('Duplicate'), 503: error('Disabled or database not connected') },
+  description: adminAuth, security: streamAdminSecurity, responses: { 400: error('Invalid stream'), 401: error('Missing or invalid token'), 409: error('Duplicate'), 503: error('Disabled or database not connected') },
 });
 operation('/api/streams/status', 'get', 'Streams', 'getStreamStatus', 'Public camera stream health (no URLs)', ok({
   available: bool, serverTime: date, staleAfterSeconds: num, streams: array({ type: 'object' }),
 }));
 operation('/api/streams/health', 'post', 'Streams', 'reportStreamHealth', 'AI service camera health report', ok({
   updated: { type: 'integer' }, ignored: array({ type: 'object' }), rejected: array({ type: 'object' }), persisted: bool,
-}), { description: streamAuth, responses: { 400: error('Malformed report'), 401: error('Missing or invalid token') } });
-for (const [method, opId, summary, auth] of [
-  ['get', 'getStream', 'Read one camera stream', streamAuth],
-  ['patch', 'updateStream', 'Change stream settings or enable / disable it', adminAuth],
-  ['delete', 'deleteStream', 'Remove a camera stream', adminAuth],
+}), { description: streamAuth, security: streamReadSecurity, responses: { 400: error('Malformed report'), 401: error('Missing or invalid token') } });
+for (const [method, opId, summary, auth, security] of [
+  ['get', 'getStream', 'Read one camera stream', streamAuth, streamReadSecurity],
+  ['patch', 'updateStream', 'Change stream settings or enable / disable it', adminAuth, streamAdminSecurity],
+  ['delete', 'deleteStream', 'Remove a camera stream', adminAuth, streamAdminSecurity],
 ]) {
   operation('/api/streams/{id}', method, 'Streams', opId, summary, ok({ stream: streamRecord }), {
-    description: auth, parameters: [streamId], responses: { 401: error('Missing or invalid token'), 404: error('Unknown stream') },
+    description: auth, security, parameters: [streamId], responses: { 401: error('Missing or invalid token'), 404: error('Unknown stream') },
   });
 }
+
+const navigation = navigationSpec({
+  ref, object, array, str, num, bool, date, nullableDate,
+});
+Object.assign(paths, navigation.paths);
+Object.assign(schemas, navigation.schemas);
 
 module.exports = {
   openapi: '3.0.3',
   info: {
     title: 'Smart Traffic AI API', version: require('../package.json').version,
-    description: 'REST API for the Python/YOLO perception integration, live dashboard, historical records and isolated simulator. POST /api/traffic requires the ingest token when TRAFFIC_INGEST_TOKEN is set. Try it out sends requests to this backend. Socket.IO events are documented separately in the project README.',
+    description: 'REST API for the public navigation mobile app (/api/v1, tags "Mobile: ..."), the Python/YOLO perception integration, live dashboard, historical records and isolated simulator. POST /api/traffic requires the ingest token when TRAFFIC_INGEST_TOKEN is set. Try it out sends requests to this backend. Socket.IO events and the full endpoint reference: backend/docs/API_REFERENCE.md; mobile integration: backend/docs/MOBILE_INTEGRATION_GUIDE.md.',
   },
   servers: [{ url: '/', description: 'Current backend host' }],
   tags: [
+    ...navigation.tags,
     { name: 'Live traffic', description: 'Real perception ingestion, observations and signal decisions.' },
     { name: 'System', description: 'Health and public configuration.' },
     { name: 'History', description: 'MongoDB observations and signal changes, filtered by data mode.' },
     { name: 'Simulation', description: 'Isolated simulated traffic and scenario controls.' },
     { name: 'Streams', description: 'Camera stream registry and health (live channel).' },
   ],
-  paths, components: { schemas },
+  paths,
+  components: {
+    schemas,
+    securitySchemes: {
+      ...navigation.securitySchemes,
+      ingestToken: { type: 'http', scheme: 'bearer', description: 'TRAFFIC_INGEST_TOKEN (the Python AI service).' },
+      streamAdminToken: { type: 'http', scheme: 'bearer', description: 'STREAM_ADMIN_TOKEN (camera stream management).' },
+    },
+  },
 };

@@ -2,7 +2,7 @@
  * Intersections managed by this backend (the live channel).
  *
  * The intersections of the operator's road network, as listed in the
- * Python integration contract (docs/python-integration-contract.md). `id`
+ * Python integration contract (python/docs/RENDER_DEPLOYMENT.md). `id`
  * is the value the AI service sends as `intersectionId` in POST /api/traffic
  * and that camera streams are registered to (POST /api/streams).
  *
