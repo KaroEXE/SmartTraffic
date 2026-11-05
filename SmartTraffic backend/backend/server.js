@@ -14,6 +14,11 @@ const { createTrafficController } = require('./controllers/trafficController');
 const { createSimulationController } = require('./controllers/simulationController');
 const { createTrafficRoutes, createSimulationRoutes } = require('./routes/trafficRoutes');
 const { createDocsRoutes } = require('./routes/docsRoutes');
+const { createHazardReportService } = require('./services/hazardReportService');
+const { createHazardController } = require('./controllers/hazardController');
+const { createHazardRoutes } = require('./routes/hazardRoutes');
+const { createOsmProxyService } = require('./services/osmProxyService');
+const { createOsmRoutes } = require('./routes/osmRoutes');
 const { initTrafficSocket } = require('./socket/trafficSocket');
 
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
@@ -55,6 +60,10 @@ const controller = createTrafficController(service, {
 });
 const simulationReadController = createTrafficController(simulation.engine, { stateService: simulation.stateService });
 
+// Driver road reports: published on the navigation map only after admin approval.
+const hazardReports = createHazardReportService({ file: config.hazardReportsFile });
+if (!config.adminToken) console.warn('[hazard-reports] ADMIN_TOKEN is not set - driver reports are collected but cannot be reviewed or published');
+
 app.use(cors({ origin: config.corsOrigin }));
 app.use(express.json({ limit: '100kb' }));
 
@@ -67,6 +76,8 @@ app.use('/api', createDocsRoutes());
 
 app.use('/api/simulation', createSimulationRoutes(simulationReadController, createSimulationController(simulation)));
 app.use('/api', createTrafficRoutes(controller));
+app.use('/api', createHazardRoutes(createHazardController(hazardReports, { adminToken: config.adminToken })));
+app.use('/api', createOsmRoutes(createOsmProxyService({ urls: config.overpassUrls, userAgent: config.overpassUserAgent })));
 app.use('/api', (req, res) => res.status(404).json({ ok: false, error: `No route ${req.method} ${req.originalUrl}` }));
 
 // Frontend + its two rendering libraries, served locally so the 3D view
@@ -104,6 +115,8 @@ server.listen(config.port, () => {
   console.log(`  Swagger     http://localhost:${config.port}/api/docs/`);
   console.log(`  Dashboard   http://localhost:${config.port}`);
   console.log(`  API         http://localhost:${config.port}/api/health`);
+  console.log(`  Navigation  http://localhost:${config.port}/navigation.html`);
+  console.log(`  Reports     http://localhost:${config.port}/admin.html`);
   console.log(`  Ingest      POST http://localhost:${config.port}/api/traffic`);
   console.log(`  Intersections: ${service.ids().join(', ')}`);
   console.log('');
@@ -117,6 +130,7 @@ async function shutdown() {
   server.close();
   setTimeout(() => process.exit(0), 3000).unref();
   // Finish in-flight history writes; open Socket.IO clients do not delay this.
+  await hazardReports.flush();
   if (history) await history.flush();
   if (simulationHistory) await simulationHistory.flush();
   await disconnectDatabase().catch(() => {});

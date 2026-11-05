@@ -24,6 +24,21 @@ function httpUrl(name) {
   return '';
 }
 
+/** Comma-separated env value, or `fallback` when empty. */
+function list(name, fallback) {
+  const items = (process.env[name] || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return items.length ? items : fallback;
+}
+
+function adminToken() {
+  const raw = (process.env.ADMIN_TOKEN || '').trim();
+  if (raw && raw.length < 16) {
+    console.warn('[config] ADMIN_TOKEN is shorter than 16 characters - road report review is disabled');
+    return '';
+  }
+  return raw;
+}
+
 const config = {
   port: num('PORT', 3000),
   corsOrigin: process.env.CORS_ORIGIN || '*',
@@ -33,6 +48,23 @@ const config = {
   // http://<flask-host>:5000/video_feed. Sent to browsers, so never put
   // credentials in it. Empty = the page shows "not connected".
   aiStreamUrl: httpUrl('AI_STREAM_URL'),
+  // Secret for the road-report review page (admin.html). Empty = reviewing
+  // is disabled and nothing drivers report is ever published.
+  adminToken: adminToken(),
+  // Driver road reports (pending, approved, rejected). Plain JSON file so it
+  // works without MongoDB.
+  // OpenStreetMap data for the navigation map, fetched by the backend
+  // (services/osmProxyService.js). Tried in order. The User-Agent identifies
+  // this app, as the Overpass usage policy requires; a contact (URL or
+  // e-mail) in it is recommended for production.
+  overpassUrls: list('OVERPASS_URLS', [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.private.coffee/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+  ]),
+  overpassUserAgent: (process.env.OVERPASS_USER_AGENT || '').trim() || 'SmartTraffic-Navigation/1.0 (traffic navigation prototype)',
+  hazardReportsFile: (process.env.HAZARD_REPORTS_FILE || '').trim()
+    || path.join(__dirname, '..', 'data', 'hazard-reports.json'),
 
   weights: {
     vehicles: num('WEIGHT_VEHICLES', 2),

@@ -220,6 +220,78 @@ test('Overpass data becomes hazards; nothing is invented', async () => {
   assert.match(buildOverpassQuery({ south: 1, west: 2, north: 3, east: 4 }), /node\["highway"="speed_camera"\]\(1,2,3,4\)/);
 });
 
+test('speed bumps tagged traffic_calming=yes are included', async () => {
+  const { parseOverpass, buildOverpassQuery } = await load('hazardService.js');
+  const [h] = parseOverpass({ elements: [{ type: 'node', id: 5, lat: 35.5, lon: 45.4, tags: { traffic_calming: 'yes' } }] });
+  assert.equal(h.kind, 'speed_bump');
+  assert.match(buildOverpassQuery({ south: 1, west: 2, north: 3, east: 4 }), /\|yes\|/);
+});
+
+test('approved reports: own loader, any zoom, reloaded once stale', async () => {
+  const { createHazardLoader } = await load('hazardService.js');
+  let calls = 0;
+  let now = 0;
+  const states = [];
+  const provider = { kinds: ['road_closure'], fetchHazards: async () => { calls += 1; return [{ id: `r${calls}`, kind: 'road_closure', lat: 36.1, lng: 44 }]; } };
+  const loader = createHazardLoader({ provider, onState: (s) => states.push(s), now: () => now, cfg: { minZoom: 0, retryAfterMs: 1000, debounceMs: 0, maxAgeMs: 50000 } });
+  const view = { bbox: { south: 34.5, west: 42.3, north: 37.4, east: 46.3 }, zoom: 7 }; // whole region
+  await loader.requestNow(view);
+  assert.equal(states.at(-1).status, 'ready', 'loads at region zoom');
+  await loader.requestNow(view);
+  assert.equal(calls, 1, 'cached while fresh');
+  now += 51000;
+  await loader.requestNow(view);
+  assert.equal(calls, 2, 'reloaded once stale, so newly approved reports appear');
+  assert.equal(states.at(-1).hazards[0].id, 'r2');
+});
+
+test('a slow load is not restarted when the map moves inside its area', async () => {
+  const { createHazardLoader } = await load('hazardService.js');
+  let calls = 0;
+  let release;
+  const provider = {
+    kinds: ['speed_camera'],
+    fetchHazards: (bbox, { signal }) => { calls += 1; return new Promise((resolve, reject) => { release = () => resolve([]); signal.addEventListener('abort', () => reject(Object.assign(new Error('x'), { code: 'aborted' }))); }); },
+  };
+  const states = [];
+  const loader = createHazardLoader({ provider, onState: (s) => states.push(s), cfg: { minZoom: 13, retryAfterMs: 0, debounceMs: 0 } });
+  const first = loader.requestNow({ bbox: { south: 35.5, west: 45.4, north: 35.52, east: 45.42 }, zoom: 15 });
+  await loader.requestNow({ bbox: { south: 35.505, west: 45.405, north: 35.515, east: 45.415 }, zoom: 16 }); // small pan/zoom
+  assert.equal(calls, 1, 'the in-flight load was kept');
+  release();
+  await first;
+  assert.equal(states.at(-1).status, 'ready');
+});
+
+test('important places: hospitals first, known categories only', async () => {
+  const { parsePlaces, buildPlacesQuery } = await load('placesService.js');
+  const places = parsePlaces({ elements: [
+    { type: 'way', id: 1, center: { lat: 35.56, lon: 45.43 }, tags: { amenity: 'hospital', name: 'نەخۆشخانەی فێرکاری', 'name:en': 'Teaching Hospital' } },
+    { type: 'node', id: 2, lat: 35.57, lon: 45.44, tags: { amenity: 'fuel' } },
+    { type: 'node', id: 3, lat: 35.58, lon: 45.45, tags: { amenity: 'bench' } },
+    { type: 'way', id: 1, center: { lat: 35.56, lon: 45.43 }, tags: { amenity: 'hospital' } },
+  ] }, 'en');
+  assert.deepEqual(places.map((p) => [p.id, p.kind, p.category, p.name]), [
+    ['osm-way-1', 'health', 'hospital', 'Teaching Hospital'],
+    ['osm-node-2', 'places', 'fuel', null],
+  ]);
+  assert.equal(places[0].altName, 'نەخۆشخانەی فێرکاری');
+  const q = buildPlacesQuery({ south: 1, west: 2, north: 3, east: 4 }, 50);
+  assert.match(q, /nwr\["amenity"="hospital"\]\(1,2,3,4\)/);
+  assert.match(q, /\.h out center tags;/, 'hospitals are not subject to the result limit');
+});
+
+test('area picker covers the whole Kurdistan Region by default', async () => {
+  const { NAV_CONFIG } = await load('config.js');
+  const { regions, defaultRegion } = NAV_CONFIG.map;
+  const all = regions.find((r) => r.id === defaultRegion);
+  const [[south, west], [north, east]] = all.bounds;
+  for (const r of regions.filter((x) => !x.bounds)) {
+    assert.ok(r.lat > south && r.lat < north && r.lng > west && r.lng < east, `${r.name} lies inside the region view`);
+  }
+  assert.equal(new Set(regions.map((r) => r.id)).size, regions.length, 'unique ids');
+});
+
 test('backend hazards are validated; unknown verification counts as unverified', async () => {
   const { parseBackendHazards } = await load('hazardService.js');
   const out = parseBackendHazards({ hazards: [
