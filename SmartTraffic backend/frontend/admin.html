@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Road Report Review</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+  <style>
+    body.ad { margin: 0; min-height: 100vh; background: var(--bg, #0a0c0e); color: var(--text, #e6e8ea); font: 15px/1.45 var(--sans, system-ui, sans-serif); }
+    .ad-wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+    .ad h1 { font-size: 20px; margin: 0 0 4px; }
+    .ad-sub { color: var(--text-3, #8b949e); margin: 0 0 16px; font-size: 14px; }
+    .ad-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .ad input, .ad select, .ad button { font: inherit; min-height: 40px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line-2, #30363d); background: var(--surface-2, #161b22); color: inherit; }
+    .ad input { flex: 1; min-width: 200px; }
+    .ad button { cursor: pointer; }
+    .ad button.ad-ok { background: #2ea043; border-color: #2ea043; color: #fff; font-weight: 600; }
+    .ad button.ad-no { border-color: #d92d20; color: #ff7b72; }
+    .ad button:disabled { opacity: 0.5; cursor: default; }
+    .ad-grid { display: grid; gap: 12px; grid-template-columns: 1fr; }
+    @media (min-width: 900px) { .ad-grid { grid-template-columns: 1fr 1fr; } }
+    #ad-map { height: 420px; border-radius: 10px; border: 1px solid var(--line-2, #30363d); }
+    .ad-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    .ad-item { padding: 12px; border-radius: 10px; border: 1px solid var(--line-2, #30363d); background: var(--surface, #0f1215); }
+    .ad-item.ad-active { border-color: #5a9cf8; }
+    .ad-item h2 { font-size: 15px; margin: 0; }
+    .ad-meta { color: var(--text-3, #8b949e); font-size: 13px; }
+    .ad-note { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .ad-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .ad-msg { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line-2, #30363d); margin-bottom: 12px; }
+    .ad-msg[hidden] { display: none; }
+    .ad-msg.ad-err { border-color: #d92d20; }
+    .ad a { color: #5a9cf8; }
+  </style>
+</head>
+<body class="ad">
+  <main class="ad-wrap">
+    <h1>Road report review</h1>
+    <p class="ad-sub">Reports from drivers appear on the navigation map only after you approve them. <a href="navigation.html">Open navigation</a></p>
+
+    <form class="ad-bar" id="ad-login" autocomplete="off">
+      <label for="ad-token" class="ad-meta">Admin token</label>
+      <input id="ad-token" type="password" placeholder="ADMIN_TOKEN from backend/.env" required>
+      <button type="submit">Load reports</button>
+    </form>
+
+    <div class="ad-bar">
+      <label for="ad-status" class="ad-meta">Show</label>
+      <select id="ad-status">
+        <option value="pending">Waiting for review</option>
+        <option value="approved">Approved (on the map)</option>
+        <option value="rejected">Rejected</option>
+        <option value="all">All</option>
+      </select>
+      <button type="button" id="ad-refresh">Refresh</button>
+    </div>
+
+    <div class="ad-msg" id="ad-msg" role="status" hidden></div>
+
+    <div class="ad-grid">
+      <div id="ad-map" aria-label="Map of the listed reports"></div>
+      <ul class="ad-list" id="ad-list" aria-label="Reports"></ul>
+    </div>
+  </main>
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="admin.js"></script>
+</body>
+</html>
