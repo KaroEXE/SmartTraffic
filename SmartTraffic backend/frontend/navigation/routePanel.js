@@ -1,6 +1,7 @@
 import {
   directionLabel, escapeHtml, formatAge, formatClock, formatDelay, formatDistance, formatDuration,
 } from './format.js';
+import { rankColor, rankLabel } from './routeRanking.js';
 
 /**
  * Bottom sheet (mobile) / side panel (desktop): live-feed status, route
@@ -21,6 +22,35 @@ const ROUTING_NOTE = {
 };
 
 const STATUS_WORD = { live: 'live', stale: 'no recent data', 'no-data': 'no data yet', offline: 'last known' };
+
+// Whether the ranking includes live AI traffic right now (routeRanking.liveStatus).
+const LIVE_NOTE = {
+  included: 'Ranked by travel time: OSRM road times plus live AI traffic at the monitored intersection.',
+  unavailable: 'Live traffic isn’t included at the moment (no fresh AI data from the monitored intersection). Ranked by OSRM road travel time.',
+  'not-on-route': 'None of these routes passes the AI-monitored intersection, so they are ranked by OSRM road travel time.',
+};
+
+function setText(el, text) {
+  if (el.textContent !== text) el.textContent = text;
+}
+
+/** Seconds as "40 s" / "2 min". */
+function shortDelay(seconds) {
+  return seconds < 90 ? `${Math.round(seconds)} s` : `${Math.round(seconds / 60)} min`;
+}
+
+/** One line on how the route's time was estimated. */
+function liveText(est) {
+  const live = est.intersections.filter((i) => i.included);
+  const missing = est.intersections.filter((i) => !i.included);
+  const parts = [`Road time ${formatDuration(est.baseDuration)} (OSRM)`];
+  for (const i of live) {
+    const where = i.approach ? `, ${directionLabel(i.approach)} approach` : '';
+    parts.push(`+${shortDelay(i.delay)} live traffic at ${i.name}${where} (${Math.round(i.vehicles)} vehicles)`);
+  }
+  for (const i of missing) parts.push(`${i.name}: ${i.reason}, not included`);
+  return parts.join(' · ');
+}
 
 export class RoutePanel {
   constructor({ root, toggle, feed, body, onSelect, onRetry, onSwitch, onDismiss }) {
@@ -102,44 +132,88 @@ export class RoutePanel {
 
   // ---------------------------------------------------------------- routes
 
-  showRoutes({ routes, selectedId, fastestId, rankBasis, trafficRouting, snapWarnings }) {
+  /**
+   * Shows the routes as a ranked list that is also the map legend (colour
+   * swatch, "Route 1 - Best" ... "Route 4 - Slowest", time and distance).
+   * Items are created once per route; rank() reorders and relabels them in
+   * place when live traffic changes the estimates.
+   */
+  showRoutes({ routes, selectedId, order, estimates, liveState, trafficRouting, snapWarnings, searching = false }) {
     this.routes = routes;
     this.msgEl.hidden = true;
     this.clearSuggestion();
-
-    const adjustedCount = routes.filter((r) => r.traffic).length;
-    const noteKey = trafficRouting === 'backend'
-      ? (adjustedCount === routes.length ? 'backend' : adjustedCount ? 'partial' : 'unavailable')
-      : trafficRouting;
-    this.noteEl.textContent = ROUTING_NOTE[noteKey] || ROUTING_NOTE['not-configured'];
-    this.noteEl.className = `nv-note${noteKey === 'backend' ? ' nv-note-live' : ''}`;
-    this.noteEl.hidden = false;
+    this.trafficRouting = trafficRouting;
 
     this.warnEl.innerHTML = (snapWarnings || []).map((w) => `<li>${escapeHtml(w)}</li>`).join('');
     this.warnEl.hidden = !snapWarnings || !snapWarnings.length;
 
-    const fastestLabel = rankBasis === 'live-ai' ? 'Fastest with live traffic' : 'Fastest by base estimate';
     this.trafficEls.clear();
-    this.listEl.innerHTML = routes.map((r) => {
-      const time = r.traffic ? r.traffic.adjustedDuration : r.duration;
-      const timeKind = r.traffic ? 'live AI-adjusted ETA' : 'base estimate';
-      const via = r.summary ? ` &middot; via ${escapeHtml(r.summary)}` : '';
-      return `<li class="nv-route-item" data-id="${r.id}">
-        <button type="button" class="nv-route" data-route="${r.id}" aria-pressed="false">
-          <span class="nv-route-top">
-            <span class="nv-route-name">Route ${r.index + 1}</span>
-            <span class="nv-route-time">${formatDuration(time)}</span>
-            ${r.id === fastestId && routes.length > 1 ? `<span class="nv-badge">${fastestLabel}</span>` : ''}
-          </span>
-          <span class="nv-route-meta">${formatDistance(r.distance)} &middot; ${timeKind}${via}</span>
-        </button>
-        <div class="nv-route-traffic"></div>
-      </li>`;
-    }).join('');
-    this.listEl.querySelectorAll('.nv-route-item').forEach((li) => {
-      this.trafficEls.set(li.dataset.id, li.querySelector('.nv-route-traffic'));
-    });
+    this.items = new Map();
+    this.listEl.innerHTML = '';
+    for (const r of routes) this._addItem(r);
+    this.rank({ order, estimates, liveState, searching });
     this.select(selectedId);
+  }
+
+  /** A route that arrived after the first ones (extra alternative). */
+  addRoute(route, ranking) {
+    this.routes = [...this.routes, route];
+    this._addItem(route);
+    this.rank(ranking);
+    this.select(this.selectedId);
+  }
+
+  _addItem(r) {
+    const li = document.createElement('li');
+    li.className = 'nv-route-item';
+    li.dataset.id = r.id;
+    li.innerHTML = `<button type="button" class="nv-route" data-route="${r.id}" aria-pressed="false">
+        <span class="nv-route-top">
+          <span class="nv-route-swatch" aria-hidden="true"></span>
+          <span class="nv-route-name"></span>
+          <span class="nv-route-time"></span>
+        </span>
+        <span class="nv-route-meta"></span>
+        <span class="nv-route-live"></span>
+      </button>
+      <div class="nv-route-traffic"></div>`;
+    this.items.set(r.id, {
+      li,
+      name: li.querySelector('.nv-route-name'),
+      time: li.querySelector('.nv-route-time'),
+      meta: li.querySelector('.nv-route-meta'),
+      live: li.querySelector('.nv-route-live'),
+    });
+    this.trafficEls.set(r.id, li.querySelector('.nv-route-traffic'));
+    this.listEl.appendChild(li);
+  }
+
+  /** Re-ranks in place: order, labels, colours, times. No element is rebuilt. */
+  rank({ order, estimates, liveState, searching = false }) {
+    this.order = order;
+    order.forEach((id, position) => {
+      const item = this.items.get(id);
+      const route = this.routes.find((r) => r.id === id);
+      if (!item || !route) return;
+      const est = estimates.get(id);
+      setText(item.name, `Route ${position + 1} \u2014 ${rankLabel(position, order.length)}`);
+      setText(item.time, formatDuration(est.duration));
+      const via = route.summary ? ` \u00b7 via ${route.summary}` : '';
+      setText(item.meta, `${formatDistance(route.distance)}${via}`);
+      setText(item.live, liveText(est));
+      item.li.style.setProperty('--rank', rankColor(position, order.length));
+      item.li.dataset.rank = String(position + 1);
+      // appendChild moves the existing node: reorders without re-creating it.
+      if (this.listEl.children[position] !== item.li) this.listEl.insertBefore(item.li, this.listEl.children[position] || null);
+    });
+
+    let note = LIVE_NOTE[liveState] || LIVE_NOTE['not-on-route'];
+    if (this.trafficRouting === 'backend') note = ROUTING_NOTE.backend;
+    if (searching) note += ' Looking for more alternative routes...';
+    else if (order.length < 4) note += ` Only ${order.length} distinct route${order.length === 1 ? '' : 's'} found on different roads between these points.`;
+    setText(this.noteEl, note);
+    this.noteEl.className = `nv-note${liveState === 'included' ? ' nv-note-live' : ''}`;
+    this.noteEl.hidden = false;
   }
 
   select(id) {
@@ -194,19 +268,24 @@ export class RoutePanel {
     const target = suggestion.routeId ? this.routes.find((r) => r.id === suggestion.routeId) : null;
     let text;
     if (suggestion.kind === 'faster') {
-      text = `Route ${target.index + 1} is now ${formatDuration(suggestion.savingSeconds)} faster based on live AI traffic.`;
+      text = `Route ${this._rankOf(target.id)} is now ${formatDuration(suggestion.savingSeconds)} faster based on live AI traffic.`;
     } else {
       const a = suggestion.alert;
       const what = a.kind === 'emergency'
         ? `emergency vehicle priority at ${a.name}`
         : `long queue at ${a.name} (${a.vehicles} vehicles, ${directionLabel(a.direction)} approach)`;
-      text = `New AI observation on your route: ${what}.${target ? ` Route ${target.index + 1} does not pass this intersection.` : ''}`;
+      text = `New AI observation on your route: ${what}.${target ? ` Route ${this._rankOf(target.id)} does not pass this intersection.` : ''}`;
     }
     this.suggestEl.dataset.key = suggestion.key;
     this.suggestEl.innerHTML = `<span>${escapeHtml(text)}</span><span class="nv-suggest-actions">
-      ${target ? `<button type="button" class="nv-btn nv-btn-primary" data-action="switch" data-route="${target.id}">Show route ${target.index + 1}</button>` : ''}
+      ${target ? `<button type="button" class="nv-btn nv-btn-primary" data-action="switch" data-route="${target.id}">Show route ${this._rankOf(target.id)}</button>` : ''}
       <button type="button" class="nv-btn" data-action="dismiss">Dismiss</button></span>`;
     this.suggestEl.hidden = false;
+  }
+
+  _rankOf(id) {
+    const i = (this.order || []).indexOf(id);
+    return i >= 0 ? i + 1 : '';
   }
 
   clearSuggestion() {

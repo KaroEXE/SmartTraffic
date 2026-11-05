@@ -15,6 +15,18 @@ const { DIRECTIONS } = require('../utils/validation');
  * so straight-through movements never conflict. Pedestrians get an
  * exclusive phase with every vehicle approach held at red.
  *
+ * Network coordination (services/networkCoordinator.js) can add two inputs:
+ *   setNetworkAdvice(id, advice)       network-aware scores per approach and
+ *                                      approaches whose exit is blocked; used
+ *                                      instead of the local scores in adaptive
+ *                                      mode only
+ *   setCorridorDirective(id, directive) an emergency corridor asks this
+ *                                      intersection to prepare / hold green
+ *                                      for one approach
+ * Neither bypasses the safety timing: yellow and all-red always run, one
+ * approach is green at a time, and minimum green is only cut short when an
+ * emergency vehicle is too close to wait (as with camera preemption).
+ *
  * Events emitted:
  *   'trafficUpdate'  snapshot   after new perception data was processed
  *   'signalUpdate'   snapshot   whenever phase / plan / mode changes
@@ -25,8 +37,10 @@ const FIXED_ORDER = ['north', 'east', 'south', 'west'];
 const MAX_EVENTS = 150;
 const EXTENSION_SECONDS = 5;
 const EXTEND_IF_SCORE_RATIO = 1.25;
+// A preparing corridor waits for minimum green unless the vehicle is closer than this (s) beyond the change interval.
+const CORRIDOR_MARGIN_SECONDS = 3;
 
-const TYPE_LABEL = { ambulance: 'AMBULANCE', police: 'POLICE', fire_truck: 'FIRE TRUCK' };
+const TYPE_LABEL = { ambulance: 'AMBULANCE', police: 'POLICE', fire_truck: 'FIRE TRUCK', emergency: 'EMERGENCY VEHICLE' };
 
 const up = (dir) => (dir ? dir.toUpperCase() : '-');
 const pct = (confidence) => `${Math.round(confidence * 100)}%`;
@@ -41,25 +55,48 @@ function perDirection(fn) {
 
 const nonNegative = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
 
+const isCountMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+/** An approach the producer has no source for (e.g. its video is missing). */
+const unavailableApproach = () => ({
+  vehicles: 0, queueLength: 0, waiting: 0, waitingTime: 0, available: false, classes: null, confidence: null,
+});
+
 /**
  * Defensive copy of one traffic observation. The REST validator already
  * guarantees the shape, but the engine may also be fed directly (e.g. by a
  * traffic-state store), so missing or non-numeric values become 0 rather
  * than NaN. Waiting time is accepted as `waiting` or `waitingTime` and is
- * exposed under both names.
+ * exposed under both names. A null approach is unavailable: it adds no
+ * demand here and is published as unavailable (null counts), never as zero.
  */
 function normalizeObservation(data) {
   const traffic = perDirection((d) => {
-    const e = (data.traffic && data.traffic[d]) || {};
+    const raw = data.traffic ? data.traffic[d] : undefined;
+    if (raw === null) return unavailableApproach();
+    const e = raw || {};
     const waiting = nonNegative(e.waiting !== undefined ? e.waiting : e.waitingTime);
-    return { vehicles: nonNegative(e.vehicles), queueLength: nonNegative(e.queueLength), waiting, waitingTime: waiting };
+    return {
+      vehicles: nonNegative(e.vehicles),
+      queueLength: nonNegative(e.queueLength),
+      waiting,
+      waitingTime: waiting,
+      available: true,
+      classes: isCountMap(e.classes) ? { ...e.classes } : null,
+      confidence: typeof e.confidence === 'number' && Number.isFinite(e.confidence) ? e.confidence : null,
+    };
   });
   const pedestrians = perDirection((d) => Boolean(data.pedestrians) && data.pedestrians[d] === true);
+  // Which detectors reported (POST /api/traffic sets this; a direct caller is
+  // taken to report what it sent).
+  const detectors = data.detectors
+    ? { pedestrians: data.detectors.pedestrians === true, emergency: data.detectors.emergency === true }
+    : { pedestrians: data.pedestrians !== undefined, emergency: data.emergency !== undefined };
   const em = data.emergency || {};
   const emergency = em.detected === true && DIRECTIONS.includes(em.direction)
     ? { detected: true, type: em.type || null, direction: em.direction, confidence: Math.min(1, nonNegative(em.confidence)) }
     : { detected: false, type: null, direction: null, confidence: 0 };
-  return { traffic, pedestrians, emergency };
+  return { traffic, pedestrians, emergency, detectors };
 }
 
 class TrafficDecisionService extends EventEmitter {
@@ -89,6 +126,65 @@ class TrafficDecisionService extends EventEmitter {
 
   // ------------------------------------------------------------------ public
 
+  /**
+   * Network advice for one intersection (from the network coordinator), or
+   * null to return to local decisions:
+   *   { cycle, scores: { dir: number }, blocked: { dir: bool }, notes: { dir: text } }
+   */
+  setNetworkAdvice(intersectionId, advice) {
+    const s = this.states.get(intersectionId);
+    if (!s) return false;
+    s.network = advice
+      ? {
+        cycle: advice.cycle,
+        scores: perDirection((d) => Math.max(0, Math.round(Number(advice.scores && advice.scores[d]) || 0))),
+        blocked: perDirection((d) => Boolean(advice.blocked && advice.blocked[d])),
+        notes: perDirection((d) => (advice.notes && advice.notes[d]) || null),
+      }
+      : null;
+    return true;
+  }
+
+  /**
+   * Emergency corridor directive (services/emergencyCorridor.js), or null:
+   *   { vehicleId, type, direction, stage: 'preparing' | 'holding', etaSeconds, purpose: 'priority' | 'flush' }
+   */
+  setCorridorDirective(intersectionId, directive) {
+    const s = this.states.get(intersectionId);
+    if (!s) return false;
+    const key = (d) => (d ? `${d.vehicleId}|${d.direction}|${d.stage}|${d.purpose || 'priority'}` : '');
+    const prev = s.corridor;
+    const next = directive
+      ? {
+        vehicleId: directive.vehicleId,
+        type: directive.type || 'ambulance',
+        direction: directive.direction,
+        stage: directive.stage,
+        etaSeconds: Number.isFinite(directive.etaSeconds) ? round1(directive.etaSeconds) : null,
+        purpose: directive.purpose || 'priority',
+      }
+      : null;
+    if (key(prev) !== key(next)) {
+      if (next && next.purpose === 'flush') {
+        this._log(s, 'PRIORITY', `Corridor support - clearing ${up(next.direction)} so ${typeLabel(next.type)} is not blocked downstream`, 'warning');
+      } else if (next) {
+        const eta = next.etaSeconds !== null ? `, ETA ${Math.round(next.etaSeconds)} s` : '';
+        const what = next.stage === 'holding' ? 'green held' : 'preparing green';
+        this._log(s, 'PRIORITY', `Emergency corridor - ${typeLabel(next.type)} approaching on ${up(next.direction)}${eta}: ${what}`, 'critical');
+      } else if (prev) {
+        this._log(s, 'PRIORITY', `Emergency corridor released (${typeLabel(prev.type)}) - returning to normal operation`);
+      }
+    }
+    s.corridor = next;
+    if (!next && s.holding === 'EMERGENCY' && !(s.emergency.active && !s.emergency.suppressed)) {
+      s.holding = null;
+      s.reason = `Corridor released - ${up(s.greenDirection)} green until the next decision`;
+    }
+    this._evaluate(s, this.now());
+    this._emitSignalIfChanged(s);
+    return true;
+  }
+
   has(intersectionId) {
     return this.states.has(intersectionId);
   }
@@ -111,6 +207,8 @@ class TrafficDecisionService extends EventEmitter {
         name: s.name,
         lat: s.lat,
         lng: s.lng,
+        positionSource: s.positionSource,
+        grid: s.grid,
         mode: snap.mode,
         phase: snap.phase,
         greenDirection: snap.greenDirection,
@@ -140,23 +238,11 @@ class TrafficDecisionService extends EventEmitter {
     if (!s) return null;
     const now = this.now();
 
-    // Development mock data never overrides a live perception feed.
-    if (data.source === 'mock') {
-      if (s.lastRealDataAt && now - s.lastRealDataAt <= this.config.timing.DATA_TIMEOUT * 1000) {
-        if (!s.mockIgnoredLogged) {
-          s.mockIgnoredLogged = true;
-          this._log(s, 'AI DATA', 'Live perception feed active - mock data ignored', 'warning');
-        }
-        return { ...this._snapshot(s), ignored: 'mock' };
-      }
-    } else {
-      s.lastRealDataAt = now;
-      s.mockIgnoredLogged = false;
-    }
-
     const obs = normalizeObservation(data);
+    this._logAvailability(s, obs.traffic);
     s.traffic = obs.traffic;
     s.pedestrians = obs.pedestrians;
+    s.detectors = obs.detectors;
     s.detection = obs.emergency;
     s.scores = perDirection((d) => this.priorityScore(obs.traffic[d]));
     s.lastDataAt = now;
@@ -211,9 +297,15 @@ class TrafficDecisionService extends EventEmitter {
       name: def.name,
       lat: def.lat,
       lng: def.lng,
+      // 'surveyed' | 'placeholder' (config/intersections.js); simulated lists have none.
+      positionSource: def.positionSource || null,
+      grid: def.grid ? { col: def.grid.col, row: def.grid.row } : null,
 
-      traffic: perDirection(() => ({ vehicles: 0, queueLength: 0, waiting: 0, waitingTime: 0 })),
+      // Nothing measured yet: no demand. Published as null counts until the
+      // first observation arrives (see _publicTraffic).
+      traffic: perDirection(() => unavailableApproach()),
       pedestrians: perDirection(() => false),
+      detectors: { pedestrians: false, emergency: false },
       scores: perDirection(() => 0),
       detection: { detected: false, type: null, direction: null, confidence: 0 },
       emergency: { active: false, type: null, direction: null, confidence: 0, since: null, suppressed: false, lastSeen: 0 },
@@ -235,14 +327,15 @@ class TrafficDecisionService extends EventEmitter {
       walkCrosswalks: [],
       pedRequestedAt: perDirection(() => null),
       pedLastSeen: perDirection(() => 0),
-      lastRealDataAt: null,
-      mockIgnoredLogged: false,
       pedCooldownUntil: 0,
       redSince: perDirection((d) => (d === 'north' ? null : now)),
 
       demandBaseline: perDirection(() => 0),
       lastDemandLogAt: perDirection(() => 0),
       lastCandidateLogAt: 0,
+
+      network: null, // coordinator advice (setNetworkAdvice)
+      corridor: null, // emergency corridor directive (setCorridorDirective)
 
       reason: 'Awaiting perception data - running fixed-time plan',
       events: [],
@@ -283,6 +376,8 @@ class TrafficDecisionService extends EventEmitter {
       name: s.name,
       lat: s.lat,
       lng: s.lng,
+      positionSource: s.positionSource,
+      grid: s.grid,
 
       // Compact decision summary. The flat fields below carry the same values
       // and are kept for existing clients.
@@ -310,8 +405,13 @@ class TrafficDecisionService extends EventEmitter {
       holding: s.holding,
       reason: s.reason,
 
-      traffic: s.traffic,
+      // Per approach: counts, or null counts with available=false when the
+      // approach has no source or nothing was received yet.
+      traffic: this._publicTraffic(s),
       pedestrians: { ...s.pedestrians },
+      // Which detectors the AI service runs. False = not measured (the
+      // matching fields above are not "none detected").
+      detectors: { ...s.detectors },
       pedestrianRequests: perDirection((d) => s.pedRequestedAt[d] !== null),
       scores: { ...s.scores },
       redSeconds: perDirection((d) => (s.redSince[d] ? Math.round((now - s.redSince[d]) / 1000) : 0)),
@@ -332,6 +432,13 @@ class TrafficDecisionService extends EventEmitter {
         observed: { ...s.detection },
       },
 
+      // Emergency corridor directive in force here (null = none).
+      corridor: s.corridor ? { ...s.corridor } : null,
+      // Network-aware scores in use (null = local decisions only).
+      network: s.network
+        ? { cycle: s.network.cycle, scores: { ...s.network.scores }, blocked: { ...s.network.blocked } }
+        : null,
+
       aiStatus: s.aiStatus,
       lastUpdate: s.lastDataAt ? new Date(s.lastDataAt).toISOString() : null,
       sourceTimestamp: s.sourceTimestamp,
@@ -347,6 +454,7 @@ class TrafficDecisionService extends EventEmitter {
       s.holding, em.active, em.suppressed, em.direction, em.type,
       DIRECTIONS.map((d) => s.pedestrianSignals[d]).join(','),
       s.next ? `${s.next.type}:${s.next.direction || ''}` : '',
+      s.corridor ? `${s.corridor.vehicleId}:${s.corridor.direction}:${s.corridor.stage}` : '',
     ].join('|');
   }
 
@@ -357,7 +465,27 @@ class TrafficDecisionService extends EventEmitter {
     this.emit('signalUpdate', this._snapshot(s));
   }
 
+  _publicTraffic(s) {
+    return perDirection((d) => {
+      const t = s.traffic[d];
+      if (!t.available || !s.updatesReceived) {
+        return { vehicles: null, queueLength: null, waiting: null, waitingTime: null, available: false, classes: null, confidence: null };
+      }
+      return { ...t, classes: t.classes ? { ...t.classes } : null };
+    });
+  }
+
   // ------------------------------------------------------------ data inputs
+
+  /** Logs approaches that lose or regain their source (e.g. a missing camera video). */
+  _logAvailability(s, traffic) {
+    for (const d of DIRECTIONS) {
+      const was = s.updatesReceived ? s.traffic[d].available : true;
+      const now = traffic[d].available;
+      if (was && !now) this._log(s, 'AI DATA', `${up(d)} camera unavailable - no detections for this approach`, 'warning');
+      else if (!was && now && s.updatesReceived) this._log(s, 'AI DATA', `${up(d)} camera available again`);
+    }
+  }
 
   _trackDemand(s, now) {
     for (const d of DIRECTIONS) {
@@ -455,9 +583,46 @@ class TrafficDecisionService extends EventEmitter {
 
   // -------------------------------------------------------- state machine
 
+  /**
+   * The emergency this intersection acts on: a camera-confirmed vehicle
+   * here first, otherwise an emergency corridor that is preparing or
+   * holding green for an approaching vehicle.
+   */
   _activeEmergency(s) {
     const em = s.emergency;
-    return em.active && !em.suppressed ? em : null;
+    if (em.active && !em.suppressed) return em;
+    const c = s.corridor;
+    if (c && (c.stage === 'preparing' || c.stage === 'holding')) {
+      return {
+        type: c.type, direction: c.direction, confidence: 1, corridor: true, stage: c.stage, eta: c.etaSeconds, purpose: c.purpose,
+      };
+    }
+    return null;
+  }
+
+  _corridorReason(em, action) {
+    if (em.purpose === 'flush') return `Emergency corridor support - clearing ${up(em.direction)} ahead of ${typeLabel(em.type)}: ${action}`;
+    const eta = em.eta !== null && em.eta !== undefined ? ` (ETA ${Math.round(em.eta)} s)` : '';
+    return `Emergency corridor - ${typeLabel(em.type)} on ${up(em.direction)}${eta}: ${action}`;
+  }
+
+  /** Scores used for decisions: network-aware when the coordinator supplied them. */
+  _scoresFor(s) {
+    return s.network ? s.network.scores : s.scores;
+  }
+
+  /** Text for choosing `best`, including why the locally busiest approach was not chosen. */
+  _choiceReason(s, best) {
+    if (!s.network) return `${up(best.direction)} has the highest traffic demand (score ${best.score})`;
+    let text = `${up(best.direction)} has the highest network score (${best.score})`;
+    const local = this._bestDirection(s, null, { local: true });
+    const notes = s.network.notes;
+    if (local && local.direction !== best.direction && notes[local.direction]) {
+      text += ` - ${up(local.direction)} (local score ${local.score}) not first: ${notes[local.direction]}`;
+    } else if (notes[best.direction]) {
+      text += ` - ${notes[best.direction]}`;
+    }
+    return text;
   }
 
   _evaluate(s, now) {
@@ -565,12 +730,21 @@ class TrafficDecisionService extends EventEmitter {
     if (em) {
       if (em.direction === dir) {
         s.holding = 'EMERGENCY';
-        s.reason = `Emergency priority - ${typeLabel(em.type)} on ${up(dir)} (${pct(em.confidence)}), green held`;
+        s.reason = em.corridor
+          ? this._corridorReason(em, 'green held')
+          : `Emergency priority - ${typeLabel(em.type)} on ${up(dir)} (${pct(em.confidence)}), green held`;
+        return false;
+      }
+      // Staged corridor: a vehicle still far away waits for minimum green.
+      if (em.corridor && em.stage === 'preparing' && elapsed < T.MIN_GREEN_TIME
+        && (em.eta === null || em.eta > T.YELLOW_TIME + T.ALL_RED_TIME + CORRIDOR_MARGIN_SECONDS)) {
+        s.reason = this._corridorReason(em, `${up(em.direction)} green after minimum green on ${up(dir)}`);
         return false;
       }
       const note = elapsed < T.MIN_GREEN_TIME ? ' (minimum green overridden)' : '';
-      this._beginYellow(s, { type: 'GREEN', direction: em.direction }, now,
-        `Emergency preemption - ${typeLabel(em.type)} approaching from ${up(em.direction)}${note}`);
+      this._beginYellow(s, { type: 'GREEN', direction: em.direction }, now, em.corridor
+        ? `${this._corridorReason(em, `switching to ${up(em.direction)}`)}${note}`
+        : `Emergency preemption - ${typeLabel(em.type)} approaching from ${up(em.direction)}${note}`);
       return true;
     }
     if (s.holding === 'EMERGENCY') s.holding = null;
@@ -603,8 +777,16 @@ class TrafficDecisionService extends EventEmitter {
       return true;
     }
 
-    // 6. Adaptive: highest priority score wins.
+    // 6. Adaptive: highest priority score wins (network-aware when advised).
     const best = this._bestDirection(s, dir);
+
+    // Network: this green's exit road is (still) blocked downstream - stop
+    // feeding it and serve an approach whose vehicles can move.
+    if (s.network && s.network.blocked[dir] && best) {
+      this._beginYellow(s, { type: 'GREEN', direction: best.direction }, now,
+        `Network: ${up(dir)} exit blocked${s.network.notes[dir] ? ` (${s.network.notes[dir]})` : ''} - ${this._choiceReason(s, best)}`);
+      return true;
+    }
     if (!best) {
       if (elapsed >= s.phaseDuration) {
         s.phaseDuration = elapsed + EXTENSION_SECONDS;
@@ -614,26 +796,27 @@ class TrafficDecisionService extends EventEmitter {
     }
 
     const current = s.traffic[dir];
-    const currentScore = s.scores[dir];
+    const currentScore = this._scoresFor(s)[dir];
     const target = { type: 'GREEN', direction: best.direction };
+    const nextText = s.network
+      ? this._choiceReason(s, best)
+      : `${up(best.direction)} has the highest demand (score ${best.score})`;
 
     if (elapsed >= T.MAX_GREEN_TIME) {
-      this._beginYellow(s, target, now,
-        `Maximum green (${T.MAX_GREEN_TIME}s) reached on ${up(dir)} - ${up(best.direction)} has the highest demand (score ${best.score})`);
+      this._beginYellow(s, target, now, `Maximum green (${T.MAX_GREEN_TIME}s) reached on ${up(dir)} - ${nextText}`);
       return true;
     }
     if (current.vehicles === 0 && current.queueLength === 0) {
-      this._beginYellow(s, target, now,
-        `${up(dir)} approach cleared - ${up(best.direction)} has the highest demand (score ${best.score})`);
+      this._beginYellow(s, target, now, `${up(dir)} approach cleared - ${nextText}`);
       return true;
     }
     if (elapsed >= s.phaseDuration) {
       if (currentScore > best.score * EXTEND_IF_SCORE_RATIO && elapsed + EXTENSION_SECONDS <= T.MAX_GREEN_TIME) {
         s.phaseDuration = elapsed + EXTENSION_SECONDS;
-        s.reason = `${up(dir)} demand still highest (score ${currentScore} vs ${best.score}) - green extended`;
+        s.reason = `${up(dir)} ${s.network ? 'network ' : ''}demand still highest (score ${currentScore} vs ${best.score}) - green extended`;
         return false;
       }
-      this._beginYellow(s, target, now, `${up(best.direction)} has the highest traffic demand (score ${best.score})`);
+      this._beginYellow(s, target, now, this._choiceReason(s, best));
       return true;
     }
     return false;
@@ -713,18 +896,22 @@ class TrafficDecisionService extends EventEmitter {
     for (const d of DIRECTIONS) {
       if (d === exclude || !s.redSince[d]) continue;
       const t = s.traffic[d];
-      if (t.vehicles === 0 && t.queueLength === 0) continue;
+      // An approach without a camera cannot show its demand, so it is still
+      // served after the maximum red time (detector-failure recall).
+      if (t.available && t.vehicles === 0 && t.queueLength === 0) continue;
       const seconds = Math.round((now - s.redSince[d]) / 1000);
       if (seconds >= limit && (!worst || seconds > worst.seconds)) worst = { direction: d, seconds };
     }
     return worst;
   }
 
-  _bestDirection(s, exclude) {
+  _bestDirection(s, exclude, { local = false } = {}) {
+    const scores = local || !s.network ? s.scores : s.network.scores;
+    const blocked = local || !s.network ? null : s.network.blocked;
     let best = null;
     for (const d of DIRECTIONS) {
-      if (d === exclude) continue;
-      const score = s.scores[d];
+      if (d === exclude || (blocked && blocked[d])) continue;
+      const score = scores[d];
       if (score <= 0) continue;
       const red = s.redSince[d] ? s.redSince[d] : Infinity;
       if (!best || score > best.score || (score === best.score && red < best.red)) {

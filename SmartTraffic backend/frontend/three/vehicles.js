@@ -9,8 +9,13 @@ import { DIRS, LAYOUT, OPPOSITE, approach, pathPoint, laneOffset } from './inter
  *   - never drive into a crosswalk with pedestrians on it
  *   - keep a minimum gap to the vehicle ahead (no overlap by construction)
  *
- * The number of vehicles queued/approaching follows the backend's
- * `traffic[dir].vehicles`, scaled and capped for readability.
+ * Driven only by the backend snapshot, with no randomness:
+ *   - vehicles waiting or approaching on `dir` = `traffic[dir].vehicles`
+ *     (the AI's detected count), up to MAX_PER_APPROACH that fit on the road
+ *   - their models follow `traffic[dir].classes` (car, bus, truck, motorcycle)
+ *   - when a count drops (e.g. the camera video restarted), the extra
+ *     vehicles at the back of the queue are removed at once, so the scene
+ *     never shows more vehicles than were detected.
  */
 
 const VMAX = 11;
@@ -19,8 +24,14 @@ const ACCEL = 3.5;
 const DECEL = 6;
 const MIN_GAP = 1.8;
 const LANES = 2;
-const MAX_PER_APPROACH = 14;
-const VIS_SCALE = 0.75;
+// As many vehicles as fit on one approach; larger counts are shown capped
+// (the tag above the approach still shows the detected number).
+export const MAX_PER_APPROACH = 14;
+// Seconds between two vehicles entering the same approach.
+const SPAWN_INTERVAL = 0.6;
+// Removed vehicles are kept (per kind) and reused by the next spawn, so a
+// long-running scene creates no new objects once warmed up.
+const POOL_MAX_PER_KIND = 48;
 
 // ---------------------------------------------------------------- models
 
@@ -83,14 +94,57 @@ const KINDS = {
     part('bus-win', [2.54, 0.85, 9.6, 2.05, 0.1], GLASS),
     part('bus-tail', [2.2, 0.15, 0.05, 0.9, -5.26], TAIL),
   ] },
+  truck: { len: 7.4, build: (mat) => [
+    part('truck-cab', [2.2, 1.9, 2.0, 1.15, 2.6], mat, true),
+    part('truck-glass', [2.0, 0.6, 0.06, 1.65, 3.61], GLASS),
+    part('truck-box', [2.4, 2.6, 5.2, 1.55, -1.0], WHITE, true),
+    part('truck-tail', [2.0, 0.14, 0.05, 0.55, -3.71], TAIL),
+  ] },
+  motorcycle: { len: 2.2, build: (mat) => [
+    part('moto-body', [0.5, 0.55, 2.0, 0.6], mat, true),
+    part('moto-rider', [0.45, 0.75, 0.5, 1.25, -0.15], POLICE_DARK),
+    part('moto-tail', [0.3, 0.1, 0.05, 0.62, -1.01], TAIL),
+  ] },
 };
 
-function pickKind() {
-  const r = Math.random();
-  if (r < 0.68) return 'car';
-  if (r < 0.88) return 'suv';
-  if (r < 0.96) return 'van';
-  return 'bus';
+// YOLO class -> model. A class without its own model is drawn as a car.
+const CLASS_KIND = { car: 'car', bus: 'bus', truck: 'truck', motorcycle: 'motorcycle' };
+// Spawn priority when two kinds are equally under-represented.
+const KIND_ORDER = ['bus', 'truck', 'motorcycle', 'car'];
+// Simulation tab only (its data has no classes): the same mix the scene has
+// always shown there (about 68% cars, 20% SUVs, 8% vans, 4% buses), taken
+// in turn from a fixed pattern instead of random draws.
+const SIMULATION_KINDS = [
+  'car', 'car', 'suv', 'car', 'car', 'van', 'car', 'suv', 'car', 'car', 'car', 'suv', 'bus',
+  'car', 'car', 'suv', 'car', 'car', 'van', 'car', 'car', 'suv', 'car', 'car', 'car',
+];
+
+/**
+ * How many of each model to show on an approach: the detected class counts,
+ * scaled down proportionally when `total` is capped. Without class data,
+ * every vehicle is a car.
+ */
+export function kindMix(classes, total) {
+  const counts = { car: 0, bus: 0, truck: 0, motorcycle: 0 };
+  let detected = 0;
+  if (classes) {
+    for (const [name, n] of Object.entries(classes)) {
+      if (!(n > 0)) continue;
+      counts[CLASS_KIND[name] || 'car'] += n;
+      detected += n;
+    }
+  }
+  if (!detected) return { car: total, bus: 0, truck: 0, motorcycle: 0 };
+  // Largest-remainder rounding so the parts add up to exactly `total`.
+  const exact = KIND_ORDER.map((k) => ({ k, v: (counts[k] * total) / detected }));
+  const mix = Object.fromEntries(exact.map(({ k, v }) => [k, Math.floor(v)]));
+  let left = total - Object.values(mix).reduce((a, b) => a + b, 0);
+  for (const { k } of exact.slice().sort((a, b) => (b.v - Math.floor(b.v)) - (a.v - Math.floor(a.v)))) {
+    if (left <= 0) break;
+    mix[k] += 1;
+    left -= 1;
+  }
+  return mix;
 }
 
 function emergencyModel(type) {
@@ -149,16 +203,21 @@ export class VehicleSystem {
 
     this.lanes = {};
     this.targets = {};
+    this.mix = {};
     this.spawnTimers = {};
     this.signals = {};
     for (const dir of DIRS) {
       this.lanes[dir] = Array.from({ length: LANES }, () => []);
       this.targets[dir] = 0;
-      this.spawnTimers[dir] = Math.random();
+      this.mix[dir] = kindMix(null, 0);
+      this.varied = false;
+      this.spawnTimers[dir] = 0;
       this.signals[dir] = 'RED';
     }
     this.emergencyKey = null;
+    this.serial = 0; // picks body colours in turn
     this._tmp = { x: 0, z: 0 };
+    this.pool = new Map(); // kind -> idle THREE.Group[]
   }
 
   // ------------------------------------------------------------ inputs
@@ -167,11 +226,60 @@ export class VehicleSystem {
     for (const dir of DIRS) this.signals[dir] = signals[dir] || 'RED';
   }
 
-  setDemand(traffic) {
+  /**
+   * `traffic`: the snapshot's per-approach data, or null for "no live data"
+   * (no vehicle is added then). An unavailable approach counts as no vehicles.
+   * `varied`: Simulation tab data (no classes) - use the simulation's mix.
+   */
+  setDemand(traffic, { varied = false } = {}) {
+    this.varied = varied;
     for (const dir of DIRS) {
-      const n = traffic && traffic[dir] ? traffic[dir].vehicles : 0;
-      this.targets[dir] = n > 0 ? Math.min(MAX_PER_APPROACH, Math.max(1, Math.round(n * VIS_SCALE))) : 0;
+      const t = traffic && traffic[dir];
+      const n = t && t.available !== false && Number.isFinite(t.vehicles) ? Math.max(0, Math.round(t.vehicles)) : 0;
+      this.targets[dir] = Math.min(MAX_PER_APPROACH, n);
+      this.mix[dir] = kindMix(t ? t.classes : null, this.targets[dir]);
+      this._trim(dir);
     }
+  }
+
+  /** Removes waiting/approaching vehicles beyond the target, back of the queue first. */
+  _trim(dir) {
+    let regular = 0;
+    for (const lane of this.lanes[dir]) for (const v of lane) if (!v.passed && !v.ev) regular += 1;
+    let excess = regular - this.targets[dir];
+    while (excess > 0) {
+      let laneIdx = -1;
+      for (let l = 0; l < LANES; l += 1) {
+        const lane = this.lanes[dir][l];
+        const last = lane[lane.length - 1];
+        if (!last || last.passed || last.ev) continue;
+        if (laneIdx < 0 || last.s < this.lanes[dir][laneIdx][this.lanes[dir][laneIdx].length - 1].s) laneIdx = l;
+      }
+      if (laneIdx < 0) return; // only emergency vehicles left behind: keep them
+      this._dispose(this.lanes[dir][laneIdx].pop());
+      excess -= 1;
+    }
+  }
+
+  /** The model the next vehicle on `dir` should use: the most under-represented one. */
+  _nextKind(dir) {
+    if (this.varied) return SIMULATION_KINDS[this.serial % SIMULATION_KINDS.length];
+    const have = { car: 0, bus: 0, truck: 0, motorcycle: 0 };
+    for (const lane of this.lanes[dir]) {
+      for (const v of lane) if (!v.passed && !v.ev) have[v.kind === 'suv' ? 'car' : v.kind] += 1;
+    }
+    let best = 'car';
+    let bestDeficit = -Infinity;
+    for (const k of KIND_ORDER) {
+      const deficit = this.mix[dir][k] - have[k];
+      if (deficit > bestDeficit) {
+        best = k;
+        bestDeficit = deficit;
+      }
+    }
+    // Cars alternate between two body styles (every third one an SUV).
+    if (best === 'car') return this.serial % 3 === 2 ? 'suv' : 'car';
+    return best;
   }
 
   setEmergency(em) {
@@ -201,23 +309,36 @@ export class VehicleSystem {
     this.emergencyKey = null;
   }
 
-  /** Populate approaches immediately so a newly selected intersection is not empty. */
+  /** Populate approaches immediately so a newly selected intersection shows its detected vehicles. */
   prefill() {
     const { stopS } = approach('north');
     for (const dir of DIRS) {
       const green = this.signals[dir] === 'GREEN';
       const cursors = [stopS - (green ? 6 : 0), stopS - (green ? 12 : 0)];
-      for (let k = 0; k < this.targets[dir]; k += 1) {
+      for (let k = this.countOnApproach(dir); k < this.targets[dir]; k += 1) {
         const lane = k % LANES;
-        const kind = pickKind();
+        const kind = this._nextKind(dir);
         const len = KINDS[kind].len;
         const s = cursors[lane] - len / 2;
         if (s - len / 2 < 2) continue;
-        cursors[lane] = s - len / 2 - (green ? 9 + Math.random() * 8 : MIN_GAP + 0.3);
+        cursors[lane] = s - len / 2 - (green ? 12 : MIN_GAP + 0.3);
         const v = this._create(dir, lane, kind, s, green ? VMAX * 0.8 : 0);
         this.lanes[dir][lane].push(v);
       }
     }
+  }
+
+  /** Vehicles in the scene, and idle ones waiting for reuse (diagnostics). */
+  count() {
+    let n = 0;
+    for (const dir of DIRS) for (const lane of this.lanes[dir]) n += lane.length;
+    return n;
+  }
+
+  pooledCount() {
+    let n = 0;
+    for (const groups of this.pool.values()) n += groups.length;
+    return n;
   }
 
   countOnApproach(dir) {
@@ -230,12 +351,20 @@ export class VehicleSystem {
 
   _create(dir, lane, kind, s, speed) {
     const model = KINDS[kind];
-    const group = new THREE.Group();
-    const mat = BODY[Math.floor(Math.random() * BODY.length)];
-    for (const mesh of model.build(mat)) group.add(mesh);
+    const mat = BODY[this.serial % BODY.length];
+    this.serial += 1;
+    const idle = this.pool.get(kind);
+    let group = idle && idle.pop();
+    if (group) {
+      // Reused: only the body colour changes (vans and buses keep theirs).
+      if (kind === 'car' || kind === 'suv' || kind === 'motorcycle' || kind === 'truck') group.children[0].material = mat;
+    } else {
+      group = new THREE.Group();
+      for (const mesh of model.build(mat)) group.add(mesh);
+    }
     group.rotation.y = approach(dir).heading;
     this.group.add(group);
-    const v = { group, dir, lane, s, v: speed, len: model.len, vmax: VMAX * (0.92 + Math.random() * 0.1), passed: false, ev: null };
+    const v = { group, kind, dir, lane, s, v: speed, len: model.len, vmax: VMAX, passed: false, ev: null };
     this._place(v);
     return v;
   }
@@ -263,9 +392,15 @@ export class VehicleSystem {
   _dispose(v) {
     this.group.remove(v.group);
     if (v.ev) {
+      // Emergency vehicles own their geometry and light materials.
       v.ev.lights.forEach((m) => m.dispose());
       v.group.traverse((o) => o.geometry && o.geometry.dispose());
+      return;
     }
+    // Regular vehicles share cached geometry and materials: keep the group for reuse.
+    if (!this.pool.has(v.kind)) this.pool.set(v.kind, []);
+    const idle = this.pool.get(v.kind);
+    if (idle.length < POOL_MAX_PER_KIND) idle.push(v.group);
   }
 
   _place(v) {
@@ -289,7 +424,7 @@ export class VehicleSystem {
       }
       if (pending >= this.targets[dir]) continue;
 
-      const kind = pickKind();
+      const kind = this._nextKind(dir);
       const len = KINDS[kind].len;
       let best = -1;
       let bestCount = Infinity;
@@ -310,7 +445,7 @@ export class VehicleSystem {
       const last = lane[lane.length - 1];
       const speed = last ? Math.min(VMAX * 0.9, last.v) : VMAX * 0.9;
       lane.push(this._create(dir, best, kind, len / 2, speed));
-      this.spawnTimers[dir] = 0.45 + Math.random() * 0.75;
+      this.spawnTimers[dir] = SPAWN_INTERVAL;
     }
   }
 

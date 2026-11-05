@@ -198,3 +198,84 @@ class FlaskTests(unittest.TestCase):
         self.assertEqual(head.status_code, 200)
         head.close()
         self.assertEqual(self.shared.health()["stream_clients"], 0)
+
+    def test_viewers_that_disconnect_free_their_slot_on_the_development_server(self):
+        """main.py's Werkzeug server never calls close() when a viewer drops
+        mid-stream (it raises while draining the socket first). The slot must
+        still come back, or closed tabs fill MAX_STREAM_CLIENTS and every
+        video request gets 503."""
+        import socket
+
+        from werkzeug.serving import make_server
+
+        settings = WebSettings(display_fps=60, max_stream_clients=2)
+        self.shared = SharedState(settings)
+        self.addCleanup(self.shared.close)
+        server = make_server("127.0.0.1", 0, create_app(self.shared, settings), threaded=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.shared.start_encoder()
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+
+        def keep_publishing():  # frames keep coming, like the running pipeline
+            while not stop.wait(0.03):
+                self.publish()
+
+        self.publish()
+        self.wait_ready()
+        threading.Thread(target=keep_publishing, daemon=True).start()
+
+        # Garbage collection off: only the lease mechanism may free the slots,
+        # as in the long-running service where dropped streams sit in old GC
+        # generations for minutes.
+        import gc
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        self.addCleanup(lambda: gc.enable() if gc_was_enabled else None)
+        idle = patch.object(SharedState, "STREAM_IDLE_SECONDS", 1.0)
+        idle.start()
+        self.addCleanup(idle.stop)
+
+        for round_ in range(5):  # more disconnects than there are slots
+            viewer = socket.create_connection(("127.0.0.1", server.server_port), timeout=5)
+            viewer.sendall(b"GET /video/north HTTP/1.1\r\nHost: test\r\n\r\n")
+            self.assertIn(b"200 OK", viewer.recv(65536), f"viewer {round_ + 1} was refused")
+            viewer.close()  # the browser tab goes away mid-stream
+            time.sleep(0.3)
+        deadline = time.monotonic() + 5
+        while self.shared.health()["stream_clients"] and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(self.shared.health()["stream_clients"], 0, "slots of dropped viewers were not reclaimed")
+
+
+class StreamLeaseTests(unittest.TestCase):
+    def setUp(self):
+        self.shared = SharedState(WebSettings(max_stream_clients=2))
+        self.addCleanup(self.shared.close)
+        self.clock = [1000.0]
+        clock = patch("app.services.shared_state.time.monotonic", side_effect=lambda: self.clock[0])
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def test_slots_are_capped_and_released_once(self):
+        first, second = self.shared.acquire_stream(), self.shared.acquire_stream()
+        self.assertTrue(first and second and first != second)
+        self.assertIsNone(self.shared.acquire_stream(), "cap reached")
+        self.shared.release_stream(first)
+        self.shared.release_stream(first)  # twice: no effect
+        self.assertEqual(self.shared.health()["stream_clients"], 1)
+        self.assertTrue(self.shared.acquire_stream())
+
+    def test_a_stream_that_stopped_pulling_frames_is_reclaimed_a_live_one_is_not(self):
+        live, dropped = self.shared.acquire_stream(), self.shared.acquire_stream()
+        self.clock[0] += SharedState.STREAM_IDLE_SECONDS - 1
+        self.shared.touch_stream(live)  # the live viewer keeps pulling frames
+        self.assertIsNone(self.shared.acquire_stream(), "nothing idle long enough yet")
+        self.clock[0] += 2
+        newcomer = self.shared.acquire_stream()
+        self.assertTrue(newcomer, "the dropped viewer's slot is reclaimed")
+        self.assertIsNone(self.shared.acquire_stream(), "the live viewer keeps its slot")
+        self.shared.release_stream(dropped)  # a late close of the reclaimed lease changes nothing
+        self.assertEqual(self.shared.health()["stream_clients"], 2)

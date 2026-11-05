@@ -13,8 +13,10 @@ const LAYERS = [
 ];
 
 const LEGEND = [
-  [ICON_HTML.routeSelected, 'Selected route'],
-  [ICON_HTML.routeAlternative, 'Alternative route (tap to select)'],
+  [ICON_HTML.routeRank(0), 'Route 1 — Best (drawn on top)'],
+  [ICON_HTML.routeRank(1), 'Route 2 — 2nd best'],
+  [ICON_HTML.routeRank(2), 'Route 3 — 3rd best'],
+  [ICON_HTML.routeRank(3), 'Route 4 — Slowest'],
   [ICON_HTML.start, 'Start'],
   [ICON_HTML.destination, 'Destination'],
   [ICON_HTML.user, 'Your location'],

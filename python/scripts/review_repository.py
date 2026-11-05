@@ -7,6 +7,10 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# The four looping videos played in files mode ship on purpose.
+# They are listed in the report and only block when one grows past 50 MB.
+SHIPPED_VIDEOS = {f"videos/video{n}.mp4" for n in range(1, 5)}
+SHIPPED_VIDEO_MAX_BYTES = 50_000_000
 
 
 def git(*args):
@@ -56,9 +60,12 @@ def main():
         if any(secret in data for secret in secrets) or credential_pattern.search(data):
             history_hits.append(name)
     ignored_tracked = git("ls-files", "-ci", "--exclude-standard").decode().splitlines()
+    shipped_videos = [{"path": name, "bytes": (ROOT / name).stat().st_size}
+                      for name in candidates if name in SHIPPED_VIDEOS]
     assets = [{"path": name, "bytes": (ROOT / name).stat().st_size}
-              for name in candidates if Path(name).suffix in binary_extensions
-              or (ROOT / name).stat().st_size > 5_000_000]
+              for name in candidates if name not in SHIPPED_VIDEOS
+              and (Path(name).suffix in binary_extensions or (ROOT / name).stat().st_size > 5_000_000)]
+    assets += [video for video in shipped_videos if video["bytes"] > SHIPPED_VIDEO_MAX_BYTES]
     blockers = []
     if known_hits or suspicious or history_hits:
         blockers.append("Review credential matches before publishing")
@@ -78,6 +85,7 @@ def main():
         "secret_or_pattern_matches_in_history": sorted(set(history_hits)),
         "already_tracked_ignored_files": ignored_tracked,
         "candidate_large_or_binary_assets": assets,
+        "shipped_videos": shipped_videos,
         "note": "A heuristic scan is not proof of absence of every possible credential. Review staged diffs manually.",
     }
     print(json.dumps(report, indent=2))

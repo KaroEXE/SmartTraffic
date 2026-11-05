@@ -146,6 +146,7 @@ def run_demo(source_path, scenario, publisher=None):
             patch.object(cv2, "waitKey", wait_key), patch.object(cv2, "destroyAllWindows"), \
             patch.object(emergency_priority, "RoboflowSampler", Sampler), \
             patch.object(project_config, "YOLO_DEVICE", "auto"), \
+            patch.object(project_config, "VIDEO_SOURCE_MODE", "cameras"), \
             patch("torch.cuda.is_available", return_value=True), \
             patch("time.monotonic", side_effect=lambda: clock[0]), \
             patch("atexit.register"), contextlib.redirect_stdout(output):

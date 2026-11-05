@@ -25,11 +25,11 @@ const osrmRoute = (duration, coords) => ({
   geometry: { type: 'LineString', coordinates: coords },
 });
 
-test('OSRM request uses lng,lat order and asks for up to two alternatives', async () => {
+test('OSRM request uses lng,lat order and asks for up to three alternatives (four routes)', async () => {
   const { buildOsrmUrl } = await load('routeService.js');
   const url = buildOsrmUrl({ lat: 35.1, lng: 45.2 }, { lat: 35.3, lng: 45.4 });
   assert.match(url, /\/route\/v1\/driving\/45\.2,35\.1;45\.4,35\.3\?/);
-  assert.match(url, /alternatives=2/);
+  assert.match(url, /alternatives=3/);
   assert.match(url, /geometries=geojson/);
 });
 

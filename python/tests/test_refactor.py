@@ -138,8 +138,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_selected_mp4_defaults_and_explicit_direction_override(self):
         with tempfile.TemporaryDirectory() as directory:
-            expected = ["videos/1car8mins.mp4", "videos/4cars.mp4",
-                        "videos/5carsgood.mp4", "videos/aFewMoreCars.mp4"]
+            expected = ["videos/video1.mp4", "videos/video2.mp4",
+                        "videos/video3.mp4", "videos/video4.mp4"]
             self.assertEqual(self.load_config(directory)["videos"], expected)
             overridden = self.load_config(directory, {"VIDEO_NORTH": "videos/custom.mp4"})
             self.assertEqual(overridden["videos"], ["videos/custom.mp4", *expected[1:]])

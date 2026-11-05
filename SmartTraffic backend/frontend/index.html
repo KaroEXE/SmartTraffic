@@ -29,13 +29,14 @@
         </svg>
         <div>
           <div class="brand-name">SMART TRAFFIC AI</div>
-          <div class="brand-sub">Adaptive signal control &middot; simulation prototype</div>
+          <div class="brand-sub">Adaptive signal control &middot; live AI camera data</div>
         </div>
       </div>
 
       <nav class="view-tabs" role="tablist" aria-label="Views">
         <button class="view-tab active" type="button" role="tab" data-view="operations" aria-selected="true">Operations</button>
         <button class="view-tab" type="button" role="tab" data-view="live-ai" aria-selected="false" aria-controls="live-ai">Live AI</button>
+        <button class="view-tab" type="button" role="tab" data-view="analytics" aria-selected="false" aria-controls="analytics">Analytics</button>
       </nav>
       <a class="view-link" href="navigation.html" aria-label="Driver navigation" title="Driver navigation">
         <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M21 3L3 10.5l7.5 3L14 21z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
@@ -83,13 +84,18 @@
 
     <!-- ============================================================ center -->
     <main class="col-center">
-      <div class="viewport" id="viewport">
+      <div class="viewport" id="viewport" tabindex="0"
+           aria-label="3D traffic network. Drag to rotate, right-drag to pan, scroll to zoom. Keys: arrows or W A S D move, Q and E rotate, plus and minus zoom, F fit network, C focus selected, R reset, N north up.">
         <div class="vp-tags" id="vp-tags"></div>
 
+        <!-- Top left: what is shown, then any alerts (stacked, never over the toolbar) -->
+        <div class="vp-topleft">
         <div class="vp-head">
           <div class="vp-title" id="vp-title">-</div>
           <div class="vp-sub mono" id="vp-sub"></div>
           <div class="mode-badge" id="mode-badge" hidden>SIMULATED DATA - NOT REAL TRAFFIC</div>
+          <!-- Live traffic mode only: is the 3D scene driven by live AI data right now? -->
+          <div class="data-badge" id="data-badge" hidden></div>
         </div>
 
         <div class="vp-alerts">
@@ -104,20 +110,106 @@
             <span class="alert-body" id="vp-ped-body"></span>
           </div>
         </div>
+        </div>
 
-        <div class="vp-tools">
-          <div class="compass" id="compass" title="North">
-            <span class="compass-n">N</span>
-            <span class="compass-needle"></span>
+        <!-- Camera toolbar: orientation | zoom | rotate | views | legend -->
+        <div class="vp-tools" role="toolbar" aria-label="Camera controls">
+          <button class="compass" id="compass" type="button" title="North up (N)" aria-label="Turn north up">
+            <span class="compass-dial"><span class="compass-n">N</span><span class="compass-needle"></span></span>
+          </button>
+          <div class="tb-group" role="group" aria-label="Zoom">
+            <button class="tb-btn" id="cam-zoom-out" type="button" title="Zoom out (-)" aria-label="Zoom out">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9"/></svg>
+            </button>
+            <button class="tb-btn" id="cam-zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9M8 3.5v9"/></svg>
+            </button>
           </div>
-          <button class="tool-btn" id="reset-view" type="button" title="Reset camera">Reset view</button>
+          <div class="tb-group" role="group" aria-label="Rotate">
+            <button class="tb-btn" id="cam-rotate-left" type="button" title="Rotate left (Q)" aria-label="Rotate left">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.2 4.6A5 5 0 1 1 3.4 9.6"/><path d="M5.6 1.8 5.2 4.6 8 5.2"/></svg>
+            </button>
+            <button class="tb-btn" id="cam-rotate-right" type="button" title="Rotate right (E)" aria-label="Rotate right">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.8 4.6A5 5 0 1 0 12.6 9.6"/><path d="M10.4 1.8 10.8 4.6 8 5.2"/></svg>
+            </button>
+          </div>
+          <div class="tb-group" role="group" aria-label="Views">
+            <button class="tb-btn tb-text" id="focus-view" type="button" title="Center the selected intersection (C)">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2.5M8 12v2.5M1.5 8H4M12 8h2.5"/></svg><span>Focus</span>
+            </button>
+            <button class="tb-btn tb-text" id="network-view" type="button" title="Fit the whole network in view (F)">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5.5V2h3.5M10.5 2H14v3.5M14 10.5V14h-3.5M5.5 14H2v-3.5"/></svg><span>Fit</span>
+            </button>
+            <button class="tb-btn tb-text" id="reset-view" type="button" title="Back to the default overview (R)">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 7.2 8 2.5l5.5 4.7M4 6v7.5h8V6"/></svg><span>Reset</span>
+            </button>
+          </div>
+          <div class="tb-group" role="group" aria-label="Legend">
+            <button class="tb-btn tb-text" id="legend-toggle" type="button" aria-expanded="false" aria-controls="vp-legend-panel" title="What the colours, arrows and lines mean">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 4h8M5.5 8h8M5.5 12h8"/><circle cx="2.6" cy="4" r=".9"/><circle cx="2.6" cy="8" r=".9"/><circle cx="2.6" cy="12" r=".9"/></svg><span>Legend</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- AI network decision: the network coordinator's latest cycle (frontend/decisionPanel.js) -->
+        <aside class="vp-decision" id="vp-decision" aria-label="AI network decision">
+          <div class="vd-head">
+            <button class="vd-toggle" id="vd-toggle" type="button" aria-expanded="true" aria-controls="vd-body">AI network decision</button>
+            <span class="vd-meta mono" id="vd-meta">connecting...</span>
+          </div>
+          <div class="vd-body" id="vd-body">
+            <div class="vd-summary" id="vd-summary"></div>
+            <div class="vd-corridors" id="vd-corridors"></div>
+            <ul class="vd-list" id="vd-list"></ul>
+          </div>
+        </aside>
+
+        <!-- Legend for every colour, arrow and line in the 3D network -->
+        <div class="vp-legend-panel" id="vp-legend-panel" hidden>
+          <div class="lgp-group">
+            <div class="lgp-title">Roads between intersections</div>
+            <div class="lgp-note">Arrows show the travel direction on each road the AI coordinates. Colour = vehicles queued at the road's far end vs its capacity. Moving arrows = vehicles are being released onto that road now.</div>
+            <span><i class="lgp-arrow free"></i>Free</span>
+            <span><i class="lgp-arrow busy"></i>Busy (30%+)</span>
+            <span><i class="lgp-arrow congested"></i>Congested (70%+)</span>
+            <span><i class="lgp-arrow blocked"></i>Blocked (90%+)</span>
+            <span><i class="lgp-arrow unknown"></i>No data</span>
+          </div>
+          <div class="lgp-group">
+            <div class="lgp-title">Intersection rings</div>
+            <span><i class="lgp-ring normal"></i>Normal operation</span>
+            <span><i class="lgp-ring congested"></i>Congestion detected</span>
+            <span><i class="lgp-ring action"></i>Signal action selected (this cycle)</span>
+            <span><i class="lgp-ring emergency"></i>Emergency corridor</span>
+            <span><i class="lgp-ring nodata"></i>Data unavailable or stale</span>
+          </div>
+          <div class="lgp-group">
+            <div class="lgp-title">Emergency corridor</div>
+            <span><i class="lgp-ribbon solid"></i>Green being prepared / held</span>
+            <span><i class="lgp-ribbon faint"></i>Planned - no signal change yet</span>
+            <span><i class="lgp-chev"></i>Emergency vehicle and its direction</span>
+            <span class="lgp-note">Chips above intersections: vehicle, ETA and stage (PLANNED &rarr; PREPARING &rarr; HOLDING).</span>
+          </div>
+          <div class="lgp-group">
+            <div class="lgp-title">Signals</div>
+            <span><i class="lg lg-green"></i>Green</span>
+            <span><i class="lg lg-yellow"></i>Yellow</span>
+            <span><i class="lg lg-red"></i>Red</span>
+            <span class="lgp-note">Only one approach of an intersection is ever green or yellow.</span>
+          </div>
         </div>
 
         <div class="vp-legend">
           <span><i class="lg lg-green"></i>Green</span>
           <span><i class="lg lg-yellow"></i>Yellow</span>
           <span><i class="lg lg-red"></i>Red</span>
-          <span class="vp-hint">Drag to orbit &middot; scroll to zoom &middot; right-drag to pan</span>
+          <span class="vp-hint"><b>Drag</b> rotate &middot; <b>Right-drag</b> pan &middot; <b>Scroll</b> zoom &middot; <b>Double-click</b> move here &middot; <b>Click a label</b> select &middot; keys <b>WASD Q/E +/- F C R</b></span>
+        </div>
+
+        <!-- Shown instead of numbers while there is no live AI data. -->
+        <div class="vp-data-state" id="vp-data-state" role="status" aria-live="polite">
+          <div class="vp-data-state-title" id="vp-data-state-title">Waiting for live data</div>
+          <div class="vp-data-state-text" id="vp-data-state-text">Connecting to the backend...</div>
         </div>
 
         <div class="vp-fallback" id="vp-fallback" hidden>3D view unavailable: WebGL is not supported in this browser.</div>
@@ -170,7 +262,14 @@
           <div><dt>AI data</dt><dd id="sys-ai">-</dd></div>
           <div><dt>Last update</dt><dd class="mono" id="sys-last">-</dd></div>
           <div><dt>Updates</dt><dd class="mono" id="sys-count">-</dd></div>
+          <div><dt title="Estimated from the longest queue: free &lt; 5, moderate 5-11, heavy 12+ vehicles">Congestion (est.)</dt><dd id="sys-congestion">-</dd></div>
+          <div><dt>Queued &middot; max wait</dt><dd class="mono" id="sys-queued">-</dd></div>
         </dl>
+      </section>
+
+      <section class="block">
+        <div class="block-head"><h2>Camera streams</h2><span class="meta" id="cam-meta"></span></div>
+        <div class="cam-list" id="cam-list"><div class="emergency-none">Loading camera streams...</div></div>
       </section>
     </aside>
 
@@ -196,49 +295,108 @@
           <button class="run-btn" type="button" id="sim-reset" disabled>Reset</button>
         </div>
         <div class="sim-grid" id="sim-grid"></div>
+        <div class="sim-network">
+          <label class="sim-tour" title="Coordinate all intersections (off = every intersection decides alone)"><input type="checkbox" id="sim-network" checked> Network optimisation</label>
+          <div class="sim-amb">
+            <select id="sim-amb-heading" aria-label="Ambulance travel direction">
+              <option value="east">Eastbound</option>
+              <option value="west">Westbound</option>
+              <option value="north">Northbound</option>
+              <option value="south">Southbound</option>
+            </select>
+            <button class="run-btn" type="button" id="sim-amb-go" title="Simulated ambulance from the selected intersection">Dispatch ambulance</button>
+            <button class="run-btn" type="button" id="sim-amb-cancel" hidden>Cancel</button>
+          </div>
+          <div class="sim-amb-state mono" id="sim-amb-state"></div>
+        </div>
       </section>
     </footer>
 
     <!-- ========================================================== live AI -->
-    <!-- What the AI camera sees. Placeholder until the Python/Flask service
-         is connected - see frontend/liveAI.js for the integration points. -->
+    <!-- What the four AI cameras see: annotated MJPEG streams loaded straight
+         from the Flask service (AI_STREAM_URL), see frontend/liveAI.js. -->
     <section class="live-ai" id="live-ai" role="tabpanel" aria-label="Live AI" hidden>
       <div class="lai-main">
         <div class="lai-camera">
           <div class="block-head">
-            <h2>Live camera</h2>
+            <h2>Live cameras</h2>
             <span class="meta mono" id="lai-cam-source">No source configured</span>
           </div>
-          <div class="lai-frame" id="lai-frame">
-            <div class="lai-placeholder" id="lai-placeholder">
-              <svg class="lai-cam-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="2.5" y="6" width="14" height="12" rx="1.5"></rect>
-                <path d="M16.5 10.5l5-3v9l-5-3z"></path>
-              </svg>
-              <div class="lai-ph-title">AI CAMERA FEED</div>
-              <div class="lai-ph-text" id="lai-ph-text">Waiting for camera connection...</div>
+          <!-- One tile per approach, in the AI service's camera order. liveAI.js
+               mounts each stream in .lai-stream and shows the placeholder while
+               a stream is connecting, reconnecting or unavailable. -->
+          <div class="lai-grid" id="lai-grid">
+            <div class="lai-frame lai-tile" data-dir="north">
+              <span class="lai-tile-name">NORTH</span>
+              <div class="lai-placeholder">
+                <svg class="lai-cam-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="2.5" y="6" width="14" height="12" rx="1.5"></rect>
+                  <path d="M16.5 10.5l5-3v9l-5-3z"></path>
+                </svg>
+                <div class="lai-ph-title">NORTH CAMERA</div>
+                <div class="lai-ph-text">Waiting for the AI service...</div>
+              </div>
+              <div class="lai-stream"></div>
             </div>
-            <!-- connectLiveVideo() mounts the stream element here -->
-            <div class="lai-stream" id="lai-stream"></div>
+            <div class="lai-frame lai-tile" data-dir="south">
+              <span class="lai-tile-name">SOUTH</span>
+              <div class="lai-placeholder">
+                <svg class="lai-cam-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="2.5" y="6" width="14" height="12" rx="1.5"></rect>
+                  <path d="M16.5 10.5l5-3v9l-5-3z"></path>
+                </svg>
+                <div class="lai-ph-title">SOUTH CAMERA</div>
+                <div class="lai-ph-text">Waiting for the AI service...</div>
+              </div>
+              <div class="lai-stream"></div>
+            </div>
+            <div class="lai-frame lai-tile" data-dir="west">
+              <span class="lai-tile-name">WEST</span>
+              <div class="lai-placeholder">
+                <svg class="lai-cam-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="2.5" y="6" width="14" height="12" rx="1.5"></rect>
+                  <path d="M16.5 10.5l5-3v9l-5-3z"></path>
+                </svg>
+                <div class="lai-ph-title">WEST CAMERA</div>
+                <div class="lai-ph-text">Waiting for the AI service...</div>
+              </div>
+              <div class="lai-stream"></div>
+            </div>
+            <div class="lai-frame lai-tile" data-dir="east">
+              <span class="lai-tile-name">EAST</span>
+              <div class="lai-placeholder">
+                <svg class="lai-cam-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="2.5" y="6" width="14" height="12" rx="1.5"></rect>
+                  <path d="M16.5 10.5l5-3v9l-5-3z"></path>
+                </svg>
+                <div class="lai-ph-title">EAST CAMERA</div>
+                <div class="lai-ph-text">Waiting for the AI service...</div>
+              </div>
+              <div class="lai-stream"></div>
+            </div>
           </div>
         </div>
 
         <section class="approaches lai-directions" id="lai-directions" aria-label="Detections by direction">
           <div class="ap" data-dir="north">
             <div class="ap-head"><span class="lamp"></span><span class="ap-name">NORTH</span></div>
-            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">--</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-note" data-field="note"></div>
           </div>
           <div class="ap" data-dir="south">
             <div class="ap-head"><span class="lamp"></span><span class="ap-name">SOUTH</span></div>
-            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">--</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-note" data-field="note"></div>
           </div>
           <div class="ap" data-dir="east">
             <div class="ap-head"><span class="lamp"></span><span class="ap-name">EAST</span></div>
-            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">--</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-note" data-field="note"></div>
           </div>
           <div class="ap" data-dir="west">
             <div class="ap-head"><span class="lamp"></span><span class="ap-name">WEST</span></div>
-            <div class="ap-main"><span class="ap-veh" data-field="vehicles">0</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-main"><span class="ap-veh" data-field="vehicles">--</span><span class="ap-unit">vehicles</span></div>
+            <div class="ap-note" data-field="note"></div>
           </div>
         </section>
       </div>
@@ -250,15 +408,15 @@
             <span class="dot"></span>
             <span class="lai-status-label" id="lai-status-label">OFFLINE / NOT CONNECTED</span>
           </div>
-          <div class="sub" id="lai-status-detail">Waiting for AI connection - placeholder until the Flask service is connected</div>
+          <div class="sub" id="lai-status-detail">Waiting for the AI service</div>
         </section>
 
         <section class="block">
           <div class="block-head"><h2>Detection summary</h2></div>
           <dl class="decision lai-summary">
-            <div class="kv"><dt>Vehicles</dt><dd><span class="big mono" id="lai-sum-vehicles">0</span></dd></div>
-            <div class="kv"><dt>Pedestrians</dt><dd><span class="big mono" id="lai-sum-pedestrians">0</span></dd></div>
-            <div class="kv"><dt>Emergency vehicles</dt><dd><span class="big mono" id="lai-sum-emergency">0</span></dd></div>
+            <div class="kv"><dt>Vehicles</dt><dd><span class="big mono" id="lai-sum-vehicles">--</span></dd></div>
+            <div class="kv"><dt>Pedestrians</dt><dd><span class="big mono" id="lai-sum-pedestrians">--</span></dd></div>
+            <div class="kv"><dt>Emergency vehicles</dt><dd><span class="big mono" id="lai-sum-emergency">--</span></dd></div>
             <div class="kv"><dt>AI confidence</dt><dd><span class="big mono" id="lai-sum-confidence">--</span></dd></div>
           </dl>
         </section>
@@ -283,6 +441,71 @@
           </dl>
         </section>
       </aside>
+    </section>
+
+    <!-- ======================================================== analytics -->
+    <!-- Fixed-time vs adaptive control, measured on identical SIMULATED
+         demand (POST /api/simulation/benchmark). See frontend/analytics.js. -->
+    <section class="analytics" id="analytics" role="tabpanel" aria-label="Analytics" hidden>
+      <div class="an-head">
+        <div>
+          <h2 class="an-title">Network optimization benchmark</h2>
+          <p class="an-lede">Fixed-time plan, per-intersection adaptive control and network-aware control, run on the same simulated road network and traffic demand, measured the same way.</p>
+        </div>
+        <div class="mode-badge an-badge">SIMULATED - NOT A REAL-WORLD MEASUREMENT</div>
+      </div>
+
+      <form class="an-controls" id="an-form">
+        <label>Scenario <select id="an-scenario"></select></label>
+        <label>Duration
+          <select id="an-duration">
+            <option value="300">5 min</option>
+            <option value="900" selected>15 min</option>
+            <option value="1800">30 min</option>
+          </select>
+        </label>
+        <label>Demand
+          <select id="an-profile">
+            <option value="steady">Steady</option>
+            <option value="surge">Surge (2x for 30% of the run)</option>
+          </select>
+        </label>
+        <label>Seed <input id="an-seed" type="number" min="0" step="1" value="1"></label>
+        <label class="an-check"><input id="an-ambulance" type="checkbox" checked> Ambulance run</label>
+        <button class="run-btn an-run" type="submit" id="an-run">Run benchmark</button>
+        <span class="an-status" id="an-status" role="status" aria-live="polite"></span>
+      </form>
+
+      <div class="an-body" id="an-body">
+        <div class="an-empty" id="an-empty">No benchmark has been run yet. Choose a scenario and run one: all three control policies are simulated on identical demand, and every figure below comes from those runs.</div>
+        <div id="an-results" hidden>
+          <p class="an-params mono" id="an-params"></p>
+          <div class="an-hero" id="an-hero"></div>
+          <div class="an-cards" id="an-cards"></div>
+          <div class="an-charts">
+            <figure class="an-chart">
+              <figcaption>Vehicles queued across the network</figcaption>
+              <div class="an-plot" id="an-chart-queue"></div>
+            </figure>
+            <figure class="an-chart">
+              <figcaption>Average wait of queued vehicles (s)</figcaption>
+              <div class="an-plot" id="an-chart-wait"></div>
+            </figure>
+            <figure class="an-chart">
+              <figcaption>Spillback: green time blocked by a full road ahead (approach-seconds, cumulative)</figcaption>
+              <div class="an-plot" id="an-chart-spill"></div>
+            </figure>
+          </div>
+          <h3 class="an-h3">Per intersection</h3>
+          <div class="an-table-wrap"><table class="an-table" id="an-table"></table></div>
+          <h3 class="an-h3">How this was measured</h3>
+          <dl class="an-method" id="an-method"></dl>
+        </div>
+        <div class="an-live">
+          <h3 class="an-h3">Live traffic</h3>
+          <p>No before/after figure is shown for live traffic. That would need recorded periods of fixed-time and adaptive operation under comparable real demand, and the backend has not recorded any. Live observations are stored as history (GET /api/history/traffic) when MongoDB is configured.</p>
+        </div>
+      </div>
     </section>
   </div>
 

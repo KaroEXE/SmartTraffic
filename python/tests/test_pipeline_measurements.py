@@ -103,6 +103,8 @@ def run_pipeline(fps, measurements, visible=lambda n: True, device="cpu", opened
             return Camera(fps)
 
         stack.enter_context(mock.patch.object(pipeline, "MODEL_PATH", model_path))
+        # Scripted cameras through the camera source path (VIDEO_SOURCE_MODE=cameras).
+        stack.enter_context(mock.patch.object(pipeline, "VIDEO_SOURCE_MODE", "cameras"))
         stack.enter_context(mock.patch.object(pipeline, "videos", ["test"] * 4))
         stack.enter_context(mock.patch.object(pipeline, "open_video", side_effect=open_video))
         resolve = {"side_effect": device} if isinstance(device, Exception) else {"return_value": device}

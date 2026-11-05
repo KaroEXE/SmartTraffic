@@ -1,0 +1,14 @@
+# Local secrets; the example file is versioned.
+.env
+.env.*
+!.env.example
+
+# Dependencies (npm install recreates them from package-lock.json).
+# NOTE: node_modules/ is currently tracked in git; this line only stops new
+# files from being added. To stop tracking it: git rm -r --cached node_modules
+node_modules/
+
+# Logs and editor files
+npm-debug.log*
+*.log
+.DS_Store

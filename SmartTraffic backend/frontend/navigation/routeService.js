@@ -1,10 +1,16 @@
 import { NAV_CONFIG } from './config.js';
 import { isValidLatLng } from './geo.js';
+import { isUsefulAlternative, viaCandidates } from './routeRanking.js';
 
 /**
  * Route planning. Road-following routes come from OSRM; a straight line is
  * never used as a route. When `trafficRoutesUrl` is configured, the backend
  * is asked first for traffic-adjusted routes and OSRM is the fallback.
+ *
+ * OSRM returns at most a few alternatives. findMoreRoutes() asks the same
+ * OSRM server for more through via points beside the direct line, one
+ * request at a time (the public server allows about one per second), and
+ * keeps only routes on different roads (routeRanking.isUsefulAlternative).
  *
  * Normalised route:
  *   { id, index, source: 'osrm' | 'backend', coordinates: [[lat, lng]...],
@@ -31,10 +37,12 @@ const OSRM_MESSAGES = {
   TooBig: 'The route request is too large for the routing service.',
 };
 
-export function buildOsrmUrl(start, destination, cfg = NAV_CONFIG.routing) {
-  const coords = `${start.lng},${start.lat};${destination.lng},${destination.lat}`;
+export function buildOsrmUrl(start, destination, cfg = NAV_CONFIG.routing, { via = null } = {}) {
+  const points = via ? [start, via, destination] : [start, destination];
+  const coords = points.map((p) => `${p.lng},${p.lat}`).join(';');
   const params = new URLSearchParams({
-    alternatives: String(Math.max(0, cfg.maxRoutes - 1)),
+    // A route through a via point is one specific route: no alternatives.
+    alternatives: via ? 'false' : String(Math.max(0, cfg.maxRoutes - 1)),
     overview: 'full',
     geometries: 'geojson',
     steps: 'true', // needed for the road-name summary; steps themselves are not kept
@@ -74,7 +82,10 @@ function normalizeRoute(raw, index, source) {
   if (!coordinates || !Number.isFinite(raw.distance) || !Number.isFinite(raw.duration)) return null;
   const summary = typeof raw.summary === 'string'
     ? raw.summary
-    : Array.isArray(raw.legs) ? raw.legs.map((l) => l && l.summary).filter(Boolean).join(', ') : '';
+    // A route through a via point has two legs; name each road once.
+    : Array.isArray(raw.legs)
+      ? [...new Set(raw.legs.flatMap((l) => (l && l.summary ? l.summary.split(', ') : [])))].join(', ')
+      : '';
   return {
     id: `${source}-${index}`,
     index,
@@ -182,6 +193,78 @@ export async function planRoutes(start, destination, { signal, cfg = NAV_CONFIG.
   }
   const osrm = await fetchOsrm(start, destination, signal, cfg);
   return { ...osrm, trafficRouting: 'not-configured' };
+}
+
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  const timer = setTimeout(resolve, ms);
+  if (signal) {
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(new RouteError('aborted', 'Request cancelled.'));
+    }, { once: true });
+  }
+});
+
+/**
+ * Adds real alternatives until there are `cfg.maxRoutes` routes, using OSRM
+ * routes through via points (see the module comment). Each via point is
+ * first moved onto a nearby named road (OSRM nearest), so the route passes
+ * along a street instead of detouring into a service way; if that route
+ * still doubles back, the next road near the same point is tried.
+ * Requests are spaced `cfg.minIntervalMs` apart and stop as soon as enough
+ * routes are found.
+ * `onRoute(route)` is called for each accepted route. Resolves with the
+ * accepted routes; failures of single candidates are skipped, never faked.
+ */
+export function buildOsrmNearestUrl(point, cfg = NAV_CONFIG.routing) {
+  return `${cfg.osrmUrl.replace(/\/$/, '')}/nearest/v1/${cfg.profile}/${point.lng},${point.lat}?number=10`;
+}
+
+/**
+ * Roads near a via point, nearest first, one per road name (OSRM nearest).
+ * Unnamed ways (service roads, parking aisles) are skipped: a route through
+ * them usually goes out and back.
+ */
+async function nearbyRoads(point, signal, cfg) {
+  const { json } = await fetchJson(buildOsrmNearestUrl(point, cfg), {}, { signal, timeoutMs: cfg.timeoutMs });
+  const waypoints = json && json.code === 'Ok' && Array.isArray(json.waypoints) ? json.waypoints : [];
+  const seen = new Set();
+  const roads = [];
+  for (const w of waypoints) {
+    const name = w && typeof w.name === 'string' ? w.name.trim() : '';
+    if (!name || seen.has(name) || !Array.isArray(w.location)) continue;
+    seen.add(name);
+    roads.push({ lat: w.location[1], lng: w.location[0] });
+  }
+  return roads;
+}
+
+export async function findMoreRoutes(start, destination, existing, { signal, cfg = NAV_CONFIG.routing, onRoute = () => {} } = {}) {
+  const found = [];
+  const all = () => [...existing, ...found];
+  const candidates = viaCandidates(start, destination).slice(0, cfg.maxViaRequests);
+  for (let k = 0; k < candidates.length && all().length < cfg.maxRoutes; k += 1) {
+    try {
+      await sleep(cfg.minIntervalMs, signal);
+      const roads = (await nearbyRoads(candidates[k], signal, cfg)).slice(0, cfg.roadsPerVia);
+      // The nearest named road first; the next one only if that route is unusable.
+      for (const via of roads) {
+        await sleep(cfg.minIntervalMs, signal);
+        const { res, json } = await fetchJson(buildOsrmUrl(start, destination, cfg, { via }), {}, { signal, timeoutMs: cfg.timeoutMs });
+        if (!res.ok || !json || json.code !== 'Ok' || !json.routes || !json.routes[0]) continue;
+        const route = normalizeRoute(json.routes[0], existing.length + found.length, 'osrm');
+        if (route && isUsefulAlternative(route, all())) {
+          route.id = `osrm-via-${k}`;
+          found.push(route);
+          onRoute(route);
+          break;
+        }
+      }
+    } catch (err) {
+      if (err.code === 'aborted' || err.code === 'offline') throw err;
+    }
+  }
+  return found;
 }
 
 /** Effective duration for ranking: adjusted only when every route has a valid adjustment. */

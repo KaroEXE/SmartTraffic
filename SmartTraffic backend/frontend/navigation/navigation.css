@@ -239,6 +239,42 @@
 .nv-routes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .nv-route-item { border: 1px solid var(--line-2); border-radius: 10px; background: var(--surface-2); }
 .nv-route-item.nv-selected { border-color: var(--nv-blue); box-shadow: inset 3px 0 0 var(--nv-blue); }
+/* Ranked routes: --rank is the route's colour, green (best) to red (slowest). */
+.nv-route-item[data-rank] { border-left: 4px solid var(--rank); }
+.nv-route-item[data-rank].nv-selected { border-color: var(--rank); box-shadow: inset 3px 0 0 var(--rank), 0 0 0 1px var(--rank); }
+.nv-route-swatch { flex: none; width: 18px; height: 5px; border-radius: 3px; background: var(--rank); align-self: center; }
+.nv-route-item[data-rank] .nv-route-name { color: var(--text-2); }
+.nv-route-live { font-size: 12px; color: var(--text-3); overflow-wrap: anywhere; }
+
+/* Rank label drawn on each route line on the map. */
+.nv-route-tag {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 3px;
+  border: 2px solid var(--rank);
+  border-radius: 12px;
+  background: rgba(14, 17, 20, 0.92);
+  color: #e6e9ec;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+}
+.nv-route-tag b {
+  display: inline-grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--rank);
+  color: #0a0c0e;
+  font-size: 11px;
+}
+.nv-route-tag-on { transform: translate(-50%, -50%) scale(1.15); }
 .nv-route {
   display: flex;
   flex-direction: column;

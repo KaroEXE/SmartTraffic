@@ -40,9 +40,10 @@ def register_routes(app, shared, settings):
         index = DIRECTIONS.index(direction)
         if not shared.frame_available(index):
             return jsonify(error="Annotated frame unavailable", direction=direction), 503, {"Retry-After": "2"}
-        if not shared.acquire_stream():
+        lease = shared.acquire_stream()
+        if not lease:
             return jsonify(error="Too many video viewers", direction=direction), 503, {"Retry-After": "5"}
-        return Response(MJPEGStream(shared, index),
+        return Response(MJPEGStream(shared, index, lease),
                         content_type="multipart/x-mixed-replace; boundary=frame",
                         headers={"X-Accel-Buffering": "no"})
 

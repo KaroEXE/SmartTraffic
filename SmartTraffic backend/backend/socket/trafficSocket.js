@@ -25,6 +25,15 @@ const { Server } = require('socket.io');
  *   systemEvent    { id, dataMode, intersectionId, time, category, message, level }
  *   subscribeError { error }
  *
+ * Both rooms (each channel has its own network coordinator)
+ *   networkDecision  { dataMode, cycle, at, evaluated, intersections, links, corridors }
+ *                    one network decision cycle (services/networkCoordinator.js)
+ *   init also carries `network: { topology, decision }`
+ *
+ * Live room only
+ *   streamStatus  { available, serverTime, staleAfterSeconds, streams }   camera stream
+ *                 configuration / health changed (no URLs; same as GET /api/streams/status)
+ *
  * Simulation room only
  *   simulationStatus  { state, scenarios, intersections, ... }   control state changed
  *   simulationReset   { dataMode, intersections: Snapshot[] }    all simulated state was discarded
@@ -32,13 +41,19 @@ const { Server } = require('socket.io');
 const MODES = ['live', 'simulation'];
 const ENGINE_EVENTS = ['trafficUpdate', 'signalUpdate', 'systemEvent'];
 
-function bindTrafficEvents(io, service, { simulation = null } = {}) {
+function bindTrafficEvents(io, service, {
+  simulation = null, streams = null, network = null,
+} = {}) {
   const engines = { live: service, simulation: simulation ? simulation.engine : null };
+  const coordinators = { live: network, simulation: simulation ? simulation.coordinator : null };
 
   const initPayload = (mode) => ({
     dataMode: mode,
     intersections: engines[mode].getAllSnapshots(),
     serverTime: new Date().toISOString(),
+    ...(coordinators[mode] ? {
+      network: { topology: coordinators[mode].topology.toJSON(), decision: coordinators[mode].latest },
+    } : {}),
     ...(mode === 'simulation' ? { simulation: simulation.getStatus() } : {}),
   });
 
@@ -62,9 +77,15 @@ function bindTrafficEvents(io, service, { simulation = null } = {}) {
     for (const event of ENGINE_EVENTS) engine.on(event, (payload) => io.to(room).emit(event, payload));
   };
   forward(service, 'live');
+  if (network) network.on('decision', (decision) => io.to('live').emit('networkDecision', decision));
+  // Camera health is live infrastructure: never sent to the simulation room.
+  if (streams) streams.on('change', (status) => io.to('live').emit('streamStatus', status));
 
   if (simulation) {
     forward(simulation.engine, 'simulation');
+    if (simulation.coordinator) {
+      simulation.coordinator.on('decision', (decision) => io.to('simulation').emit('networkDecision', decision));
+    }
     simulation.on('status', (status) => io.to('simulation').emit('simulationStatus', status));
     simulation.on('reset', (snapshots) => {
       io.to('simulation').emit('simulationReset', { dataMode: 'simulation', intersections: snapshots });
@@ -74,9 +95,11 @@ function bindTrafficEvents(io, service, { simulation = null } = {}) {
   return io;
 }
 
-function initTrafficSocket(httpServer, service, { corsOrigin = '*', simulation = null } = {}) {
+function initTrafficSocket(httpServer, service, {
+  corsOrigin = '*', simulation = null, streams = null, network = null,
+} = {}) {
   const io = new Server(httpServer, { cors: { origin: corsOrigin } });
-  return bindTrafficEvents(io, service, { simulation });
+  return bindTrafficEvents(io, service, { simulation, streams, network });
 }
 
 module.exports = { initTrafficSocket, bindTrafficEvents };

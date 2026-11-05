@@ -13,7 +13,16 @@ export const NAV_CONFIG = Object.freeze({
     // demo server has no SLA and allows about one request per second.
     osrmUrl: 'https://router.project-osrm.org',
     profile: 'driving',
-    maxRoutes: 3,
+    // Routes shown, ranked best to worst. OSRM's own alternatives come first;
+    // the rest are OSRM routes through via points (routeService.findMoreRoutes).
+    maxRoutes: 4,
+    // At most this many via points are tried per start/destination pair
+    // (two OSRM requests each: nearest road + route), every request spaced
+    // minIntervalMs apart (public OSRM: about one request per second).
+    maxViaRequests: 10,
+    // Roads tried per via point (each one route request) before moving on.
+    roadsPerVia: 2,
+    minIntervalMs: 1100,
     timeoutMs: 15000,
     // A start/destination snapped more than this far onto a road is reported.
     snapWarningMeters: 300,
@@ -73,5 +82,12 @@ export const NAV_CONFIG = Object.freeze({
     // Shown as "long queue" when an approach reports at least this many
     // queued vehicles. The label states the number; it is not a traffic score.
     longQueueVehicles: 10,
+    // Live delay at a monitored intersection (routeRanking.estimateRoute):
+    // mean wait of the stopped vehicles on the approach the route enters by,
+    // plus this many seconds per vehicle on that approach (one saturation
+    // headway, the time each vehicle ahead takes to clear the stop line).
+    secondsPerVehicle: 2,
+    // Two routes swap places only when their estimates differ by more than this.
+    rankHysteresisSeconds: 5,
   },
 });

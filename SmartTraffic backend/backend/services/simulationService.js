@@ -3,6 +3,9 @@ const defaultConfig = require('../config');
 const { DIRECTIONS, validateObservation, toDecisionInput } = require('../utils/validation');
 const { createTrafficDecisionService } = require('./trafficDecisionService');
 const { createTrafficStateService } = require('./trafficStateService');
+const { buildTopology, OPPOSITE } = require('./networkTopology');
+const { createNetworkTrafficModel, straightPath, routePath } = require('./networkTrafficModel');
+const { createNetworkCoordinator } = require('./networkCoordinator');
 
 /**
  * Simulation - generated traffic for demonstrations, completely separate from
@@ -20,9 +23,15 @@ const { createTrafficStateService } = require('./trafficStateService');
  *          any      -> reset() -> stopped (fresh engine state, scenarios back to "normal")
  *          running  -> generator failure -> error (live is unaffected; start() resets and retries)
  *
- * Each running second, every intersection gets one generated observation. It
- * goes through the same path as a real one: validateObservation -> store ->
- * engine.ingest. Observations are tagged source "simulation".
+ * Each running second, the network traffic model (services/networkTrafficModel.js)
+ * advances: new vehicles enter, green approaches release vehicles onto the
+ * road to the next intersection (limited by its capacity), and every
+ * intersection gets one generated observation. It goes through the same
+ * path as a real one: validateObservation -> store -> engine.ingest.
+ * Observations are tagged source "simulation". The network coordinator
+ * (services/networkCoordinator.js) runs every DECISION_INTERVAL simulated
+ * seconds, and simulated emergency vehicles (dispatchAmbulance) report their
+ * position to its corridor planner like a GPS feed would.
  *
  * Events: 'status' (control state changed), 'reset' (all state discarded).
  * The engine's own events (trafficUpdate / signalUpdate / systemEvent) are
@@ -64,8 +73,12 @@ const TOUR = [
 
 // The simulated emergency vehicle is reported until its approach has been green this long.
 const EMERGENCY_PASS_SECONDS = 15;
-
 // ---------------------------------------------------------------- generator
+
+// Vehicles entering an approach fed by another managed intersection mostly
+// come from that intersection; local side-street demand is this share of the
+// scenario rate.
+const INTERNAL_DEMAND_FACTOR = 0.35;
 
 function poisson(world, lambda) {
   const limit = Math.exp(-lambda);
@@ -80,7 +93,7 @@ function poisson(world, lambda) {
 
 const rand = (world, min, max) => min + world.random() * (max - min);
 
-function createWorld(id, random, now) {
+function createWorld(id, random, now, model) {
   const world = {
     id,
     random,
@@ -90,7 +103,6 @@ function createWorld(id, random, now) {
     tourIndex: 0,
     drift: {},
     bias: {},
-    queues: {},
     pedestrians: {},
     emergency: null,
     nextRandomPedAt: 0,
@@ -99,16 +111,17 @@ function createWorld(id, random, now) {
     world.drift[d] = rand(world, 0, Math.PI * 2);
     world.bias[d] = rand(world, 0.75, 1.3);
     world.pedestrians[d] = false;
-    world.queues[d] = [];
     // A little traffic so the first frame is not empty.
     const n = Math.round(rand(world, 1, 5));
-    for (let i = 0; i < n; i += 1) world.queues[d].push(now - rand(world, 0, 15000));
+    const arrivals = [];
+    for (let i = 0; i < n; i += 1) arrivals.push(now - rand(world, 0, 15000));
+    model.setQueue(id, d, arrivals.sort((a, b) => a - b));
   }
   world.nextRandomPedAt = now + rand(world, 25, 70) * 1000;
   return world;
 }
 
-function applyScenario(world, scenarioId, now, { fromTour = false } = {}) {
+function applyScenario(world, scenarioId, now, model, { fromTour = false } = {}) {
   const scenario = SCENARIO_BY_ID[scenarioId];
   if (!scenario) return false;
   if (!fromTour) world.tour = false;
@@ -121,12 +134,12 @@ function applyScenario(world, scenarioId, now, { fromTour = false } = {}) {
   if (scenario.pedestrian) world.pedestrians[scenario.pedestrian] = true;
   if (scenario.id === 'long-wait-west') {
     // A few vehicles that have already been waiting a while.
-    world.queues.west = [now - 38000, now - 34000, now - 29000, now - 21000];
+    model.setQueue(world.id, 'west', [now - 38000, now - 34000, now - 29000, now - 21000]);
   }
   return true;
 }
 
-function advanceTour(world, now) {
+function advanceTour(world, now, model) {
   if (!world.tour) return;
   const [id, duration] = TOUR[world.tourIndex];
   const elapsed = (now - world.scenarioStartedAt) / 1000;
@@ -134,7 +147,7 @@ function advanceTour(world, now) {
   if (!done) return;
   if (duration === null && world.emergency) world.emergency = null;
   world.tourIndex = (world.tourIndex + 1) % TOUR.length;
-  applyScenario(world, TOUR[world.tourIndex][0], now, { fromTour: true });
+  applyScenario(world, TOUR[world.tourIndex][0], now, model, { fromTour: true });
   if (id === 'pedestrian-south') world.pedestrians.south = false;
 }
 
@@ -148,35 +161,21 @@ function rateFor(world, dir, now) {
   return Math.max(0.01, rate);
 }
 
-/** One simulated second at one intersection, given its current signal state. Returns an observation. */
-function stepWorld(world, snap, now) {
+/** New vehicles entering the network at one intersection this second. */
+function generateArrivals(world, now, model) {
+  advanceTour(world, now, model);
+  for (const dir of DIRECTIONS) {
+    const rate = rateFor(world, dir, now) * (model.isBoundary(world.id, dir) ? 1 : INTERNAL_DEMAND_FACTOR);
+    model.arrive(world.id, dir, poisson(world, rate), now, MAX_QUEUE);
+  }
+}
+
+/** What the intersection's cameras report this second, given its signal state. */
+function observeWorld(world, snap, now, model) {
   const signals = snap ? snap.signals : {};
   const walking = snap ? snap.pedestrianSignals : {};
-
-  advanceTour(world, now);
-
-  const traffic = {};
-  for (const dir of DIRECTIONS) {
-    const queue = world.queues[dir];
-    const rate = rateFor(world, dir, now);
-
-    const arrivals = poisson(world, rate);
-    for (let i = 0; i < arrivals && queue.length < MAX_QUEUE; i += 1) queue.push(now);
-
-    if (signals[dir] === 'GREEN') {
-      queue.splice(0, 1 + (world.random() < 0.35 ? 1 : 0));
-    } else if (signals[dir] === 'YELLOW' && world.random() < 0.5) {
-      queue.shift();
-    }
-
-    const waiting = queue.length ? queue.reduce((sum, t) => sum + (now - t), 0) / queue.length / 1000 : 0;
-    // Vehicles in view = queued + moving vehicles approaching the stop line.
-    traffic[dir] = {
-      vehicles: queue.length + poisson(world, rate * 6),
-      queueLength: queue.length,
-      waitingTime: Math.round(waiting * 10) / 10,
-    };
-  }
+  // Vehicles coming from outside the managed network that are already in view.
+  const traffic = model.observation(world.id, now, (dir) => poisson(world, rateFor(world, dir, now) * 6));
 
   // A pedestrian request stays up until the engine has let them walk.
   for (const dir of DIRECTIONS) {
@@ -207,6 +206,9 @@ function stepWorld(world, snap, now) {
       };
     }
   }
+  // A dispatched emergency vehicle close to this intersection is seen by its camera.
+  const seen = !emergency.detected && model.cameraSees(world.id);
+  if (seen) emergency = { detected: true, type: seen.type, direction: seen.direction, confidence: 0.93 };
 
   return {
     intersectionId: world.id,
@@ -258,15 +260,36 @@ class SimulationService extends EventEmitter {
     });
     this.stateService = createTrafficStateService({ now: real });
     this.intersections = intersections;
+    this.config = config;
+    this.topology = buildTopology(intersections, config.network || {});
+    // The coordinator runs inside the generator tick (every DECISION_INTERVAL
+    // simulated seconds), so it pauses and resumes with the simulation.
+    this.coordinator = createNetworkCoordinator({
+      engine: this.engine,
+      topology: this.topology,
+      config,
+      now: this.clock.now,
+      dataMode: 'simulation',
+      enabled: !config.network || config.network.ENABLED !== false,
+      cameraCorridors: true,
+    });
+    this.decisionEvery = Math.max(1, Math.round((config.network && config.network.DECISION_INTERVAL) || 2));
     this.state = 'stopped';
     this.lastError = null;
     this.timer = null;
     this.worlds = new Map();
+    this.lastAmbulance = null;
     this._createWorlds();
   }
 
   _createWorlds() {
-    this.worlds = new Map(this.intersections.map((ix) => [ix.id, createWorld(ix.id, this.random, this.clock.now())]));
+    const now = this.clock.now();
+    this.model = createNetworkTrafficModel({
+      topology: this.topology, ids: this.intersections.map((i) => i.id), random: this.random,
+    });
+    this.worlds = new Map(this.intersections.map((ix) => [ix.id, createWorld(ix.id, this.random, now, this.model)]));
+    this.coordinator.reset();
+    this.ticks = 0;
   }
 
   // ----------------------------------------------------------------- control
@@ -304,6 +327,7 @@ class SimulationService extends EventEmitter {
     this.engine.reset();
     this.stateService.clear();
     this._createWorlds();
+    this.lastAmbulance = null;
     this.lastError = null;
     this.state = 'stopped';
     this.emit('reset', this.engine.getAllSnapshots());
@@ -312,7 +336,7 @@ class SimulationService extends EventEmitter {
   setScenario(intersectionId, scenarioId) {
     const world = this.worlds.get(intersectionId);
     if (!world) return { ok: false, status: 404, error: `Unknown intersectionId "${intersectionId}"` };
-    if (!applyScenario(world, scenarioId, this.clock.now())) {
+    if (!applyScenario(world, scenarioId, this.clock.now(), this.model)) {
       return { ok: false, status: 400, error: `Unknown scenario. Use one of: ${SCENARIOS.map((s) => s.id).join(', ')}` };
     }
     this.emit('status', this.getStatus());
@@ -325,8 +349,71 @@ class SimulationService extends EventEmitter {
     world.tour = Boolean(enabled);
     if (world.tour) {
       world.tourIndex = 0;
-      applyScenario(world, TOUR[0][0], this.clock.now(), { fromTour: true });
+      applyScenario(world, TOUR[0][0], this.clock.now(), this.model, { fromTour: true });
     }
+    this.emit('status', this.getStatus());
+    return { ok: true, status: this.getStatus() };
+  }
+
+  /** Network-wide optimisation on (coordinated) or off (every intersection alone). */
+  setNetworkOptimization(enabled) {
+    this.coordinator.setEnabled(enabled);
+    this.emit('status', this.getStatus());
+    return { ok: true, status: this.getStatus() };
+  }
+
+  /**
+   * Sends a SIMULATED emergency vehicle through the network. It starts
+   * 150 m before `from` and either drives straight on (`heading` = travel
+   * direction) or follows `route` (adjacent intersection ids starting with
+   * `from`). Its position is reported to the corridor planner every second,
+   * as a GPS feed would.
+   */
+  dispatchAmbulance({
+    from, heading, route, type = 'ambulance',
+  } = {}) {
+    if (typeof from !== 'string' || !this.topology.has(from)) {
+      return { ok: false, status: 404, error: `Unknown intersectionId "${from}"` };
+    }
+    if (!['ambulance', 'police', 'fire_truck'].includes(type)) return { ok: false, status: 400, error: 'type must be ambulance, police or fire_truck' };
+    let path;
+    if (route !== undefined) {
+      if (!Array.isArray(route) || route.length < 1 || route[0] !== from || route.some((id) => !this.topology.has(id))) {
+        return { ok: false, status: 400, error: 'route must be a list of intersection ids starting with "from"' };
+      }
+      const firstHeading = heading || (route.length > 1 ? this.topology.headingBetween(route[0], route[1]) : null);
+      if (!DIRECTIONS.includes(firstHeading)) return { ok: false, status: 400, error: 'heading is required for a one-intersection route' };
+      path = routePath(this.topology, route, OPPOSITE[firstHeading]);
+      if (!path) return { ok: false, status: 400, error: 'every route step must be a road between neighbouring intersections' };
+    } else {
+      if (!DIRECTIONS.includes(heading)) return { ok: false, status: 400, error: `heading must be one of ${DIRECTIONS.join(', ')}` };
+      path = straightPath(this.topology, from, heading);
+    }
+    const id = this.model.dispatch({ type, path, t: this.clock.now() });
+    this._reportTracks();
+    this.emit('status', this.getStatus());
+    return { ok: true, vehicleId: id, status: this.getStatus() };
+  }
+
+  /** New route from the vehicle's next intersection onward (route change). */
+  rerouteAmbulance(vehicleId, route) {
+    const a = this.model.ambulance(vehicleId);
+    if (!a || a.finishedAt !== null) return { ok: false, status: 404, error: `No active emergency vehicle "${vehicleId}"` };
+    const at = a.path[a.index];
+    if (!Array.isArray(route) || route[0] !== at.id) {
+      return { ok: false, status: 400, error: `route must start with the vehicle's next intersection "${at.id}"` };
+    }
+    const path = routePath(this.topology, route, at.approach);
+    if (!path) return { ok: false, status: 400, error: 'every route step must be a road between neighbouring intersections' };
+    this.model.reroute(vehicleId, path);
+    this._reportTracks();
+    this.emit('status', this.getStatus());
+    return { ok: true, status: this.getStatus() };
+  }
+
+  cancelAmbulance(vehicleId) {
+    if (!this.model.cancel(vehicleId)) return { ok: false, status: 404, error: `No emergency vehicle "${vehicleId}"` };
+    this.coordinator.planner.removeTrack(vehicleId);
     this.emit('status', this.getStatus());
     return { ok: true, status: this.getStatus() };
   }
@@ -337,6 +424,18 @@ class SimulationService extends EventEmitter {
       state: this.state,
       error: this.lastError,
       scenarios: SCENARIOS.map(({ id, label }) => ({ id, label })),
+      network: { enabled: this.coordinator.enabled },
+      ambulances: this.model.ambulances().filter((a) => a.finishedAt === null).map((a) => ({
+        id: a.id,
+        type: a.type,
+        route: a.path.map((p) => p.id),
+        towards: a.path[a.index] ? a.path[a.index].id : null,
+        distanceM: Math.round(a.distanceM),
+        stops: a.stops,
+        stoppedSeconds: a.stoppedSeconds,
+        waiting: a.moving ? null : a.waitReason || null,
+      })),
+      lastAmbulance: this.lastAmbulance,
       intersections: Object.fromEntries([...this.worlds.values()].map((w) => [w.id, {
         scenario: w.scenario,
         tour: w.tour,
@@ -359,16 +458,44 @@ class SimulationService extends EventEmitter {
     this.engine.stop();
   }
 
-  /** Generates and submits one observation per intersection. Ignored unless running. */
+  _reportTracks() {
+    for (const track of this.model.tracks()) this.coordinator.planner.updateTrack(track);
+  }
+
+  /** One simulated second for the whole network. Ignored unless running. */
   tick() {
     if (this.state !== 'running') return;
     try {
       const now = this.clock.now();
+      const signalsOf = (id) => this.engine.getSnapshot(id).signals;
+      for (const world of this.worlds.values()) generateArrivals(world, now, this.model);
+      this.model.step(now, signalsOf);
+
+      const events = this.model.stepAmbulances(now, signalsOf);
+      for (const e of events.filter((ev) => ev.type === 'finished')) {
+        const a = this.model.ambulance(e.vehicleId);
+        this.lastAmbulance = {
+          id: a.id,
+          type: a.type,
+          route: a.path.map((p) => p.id),
+          stops: a.stops,
+          stoppedSeconds: a.stoppedSeconds,
+          travelSeconds: Math.round((a.finishedAt - a.startedAt) / 1000),
+          delaySeconds: Math.max(0, Math.round((a.finishedAt - a.startedAt) / 1000 - a.freeFlowSeconds)),
+        };
+        this.model.cancel(e.vehicleId);
+        this.coordinator.planner.removeTrack(e.vehicleId);
+      }
+      this._reportTracks();
+
       for (const world of this.worlds.values()) {
-        const observation = stepWorld(world, this.engine.getSnapshot(world.id), now);
+        const observation = observeWorld(world, this.engine.getSnapshot(world.id), now, this.model);
         observation.timestamp = new Date(this.real()).toISOString();
         this._submit(observation);
       }
+      this.ticks += 1;
+      if (this.ticks % this.decisionEvery === 0) this.coordinator.cycle();
+      if (events.length) this.emit('status', this.getStatus());
     } catch (err) {
       this._fail(err);
     }
@@ -395,4 +522,14 @@ function createSimulationService(options) {
   return new SimulationService(options);
 }
 
-module.exports = { SimulationService, createSimulationService, SCENARIOS, createPausableClock };
+module.exports = {
+  SimulationService,
+  createSimulationService,
+  SCENARIOS,
+  SCENARIO_BY_ID,
+  createPausableClock,
+  INTERNAL_DEMAND_FACTOR,
+  // Demand model, shared with the controlled benchmark (simulationBenchmark.js).
+  poisson,
+  rateFor,
+};

@@ -17,7 +17,7 @@ audit/source-before.zip
 
 # Large local inputs and training output are not source code.
 AIModels/
-videos/
+videos/*
 runs/
 *.zip
 
@@ -71,3 +71,10 @@ lightning_logs/
 datasets/*
 !datasets/.gitkeep
 !datasets/README.md
+
+# The four looping videos the service plays (VIDEO_SOURCE_MODE=files) ship with
+# the code. Every other video stays ignored.
+!videos/video1.mp4
+!videos/video2.mp4
+!videos/video3.mp4
+!videos/video4.mp4

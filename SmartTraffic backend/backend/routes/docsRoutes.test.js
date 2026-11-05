@@ -8,7 +8,8 @@ const spec = require('../docs/openapi');
 const { validateObservation } = require('../utils/validation');
 
 test('Swagger documents all traffic and simulation routes with valid references and examples', () => {
-  const controller = new Proxy({}, { get: () => (req, res) => res.end() });
+  const handler = (req, res) => res.end();
+  const controller = new Proxy({}, { get: (target, name) => (name === 'postTrafficHandlers' ? [handler] : handler) });
   const ids = new Set();
   for (const [prefix, router] of [
     ['/api', createTrafficRoutes(controller)],

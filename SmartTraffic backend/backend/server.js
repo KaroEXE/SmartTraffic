@@ -5,20 +5,21 @@ const cors = require('cors');
 
 const config = require('./config');
 const intersections = require('./config/intersections');
-const { connectDatabase, disconnectDatabase, getDatabaseStatus } = require('./config/database');
+const simulationIntersections = require('./config/simulationIntersections');
+const { connectDatabase, disconnectDatabase, getDatabaseStatus, isDatabaseConnected } = require('./config/database');
 const { createTrafficDecisionService } = require('./services/trafficDecisionService');
 const { trafficStateService } = require('./services/trafficStateService');
 const { createTrafficHistoryService } = require('./services/trafficHistoryService');
 const { createSimulationService } = require('./services/simulationService');
+const { createStreamRegistryService } = require('./services/streamRegistryService');
+const { buildTopology } = require('./services/networkTopology');
+const { createNetworkCoordinator } = require('./services/networkCoordinator');
 const { createTrafficController } = require('./controllers/trafficController');
 const { createSimulationController } = require('./controllers/simulationController');
-const { createTrafficRoutes, createSimulationRoutes } = require('./routes/trafficRoutes');
+const { createStreamController } = require('./controllers/streamController');
+const { createTrafficRoutes, createSimulationRoutes, createStreamRoutes } = require('./routes/trafficRoutes');
 const { createDocsRoutes } = require('./routes/docsRoutes');
-const { createHazardReportService } = require('./services/hazardReportService');
-const { createHazardController } = require('./controllers/hazardController');
-const { createHazardRoutes } = require('./routes/hazardRoutes');
-const { createOsmProxyService } = require('./services/osmProxyService');
-const { createOsmRoutes } = require('./routes/osmRoutes');
+const { createNavigationApi, navigationWarnings } = require('./services/navigation');
 const { initTrafficSocket } = require('./socket/trafficSocket');
 
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
@@ -30,25 +31,59 @@ function packageDir(name) {
 const app = express();
 const server = http.createServer(app);
 
-// LIVE channel: real perception data -> trafficStateService -> `service`.
+// LIVE channel: AI observations (POST /api/traffic) -> trafficStateService
+// -> decision engine `service` -> Socket.IO room "live". Only real data.
 const service = createTrafficDecisionService({ intersections, config });
 
-// SIMULATION channel: its own engine and store, idle until started from the
-// dashboard. Shares nothing with the live objects above.
-const simulation = createSimulationService({ intersections, config });
+// LIVE network coordination: network-aware scores for every intersection
+// with fresh AI data, and emergency corridors from camera detections
+// (route assumed straight ahead - there is no GPS feed). Intersections
+// without data keep their own fixed-time plan.
+const network = createNetworkCoordinator({
+  engine: service,
+  topology: buildTopology(intersections, config.network),
+  config,
+  dataMode: 'live',
+  enabled: config.network.ENABLED,
+  cameraCorridors: config.network.CORRIDOR_FROM_CAMERA,
+});
+
+// SIMULATION channel (the dashboard's Simulation tab): its own generator,
+// engine, store and intersection list, idle until started from the
+// dashboard. Shares nothing with the live objects above, and nothing it
+// produces can reach them.
+const simulation = createSimulationService({ intersections: simulationIntersections, config });
 
 // Historical data (MongoDB). Signal control does not depend on it. One
 // instance per channel; each stamps its own dataMode on what it writes.
+const sampleIntervalMs = config.historySampleSeconds * 1000;
 const history = config.mongodbUri
-  ? createTrafficHistoryService({ stateService: trafficStateService, decisionService: service, dataMode: 'live' }).start()
+  ? createTrafficHistoryService({
+    stateService: trafficStateService, decisionService: service, dataMode: 'live', sampleIntervalMs,
+  }).start()
   : null;
 const simulationHistory = config.mongodbUri
   ? createTrafficHistoryService({
-    stateService: simulation.stateService, decisionService: simulation.engine, dataMode: 'simulation',
+    stateService: simulation.stateService, decisionService: simulation.engine, dataMode: 'simulation', sampleIntervalMs,
   }).start()
   : null;
 if (simulationHistory) simulation.on('reset', () => simulationHistory.resetTracking());
 connectDatabase(config.mongodbUri);
+
+// Camera stream registry (MongoDB). Live channel only. Reloaded every 30 s
+// while the database is connected, so the dashboard's camera status and
+// ingestion's attribution check use the current configuration.
+const streams = createStreamRegistryService();
+const refreshStreams = () => {
+  if (isDatabaseConnected()) streams.refresh().catch(() => {});
+};
+setInterval(refreshStreams, 30_000).unref();
+setTimeout(refreshStreams, 2_000).unref();
+
+// MOBILE NAVIGATION API (/api/v1): places, routes, live traffic, road
+// features and community reports for the public navigation app. Reads the
+// LIVE engine only; road features and reports are stored in MongoDB.
+const navigation = createNavigationApi({ config, engine: service });
 
 const controller = createTrafficController(service, {
   history,
@@ -57,13 +92,21 @@ const controller = createTrafficController(service, {
     ...(history ? history.stats() : {}),
     ...(simulationHistory ? { simulation: simulationHistory.stats() } : {}),
   }),
+  ingestToken: config.trafficIngestToken,
+  streamRegistry: streams,
+  network,
+  navigationHealth: navigation.health,
 });
-const simulationReadController = createTrafficController(simulation.engine, { stateService: simulation.stateService });
+const simulationReadController = createTrafficController(simulation.engine, {
+  stateService: simulation.stateService, network: simulation.coordinator,
+});
+if (!config.trafficIngestToken) {
+  console.warn('[server] TRAFFIC_INGEST_TOKEN is not set: anyone who can reach POST /api/traffic can post traffic data. Set it (and the same value on the AI service) in production.');
+}
 
-// Driver road reports: published on the navigation map only after admin approval.
-const hazardReports = createHazardReportService({ file: config.hazardReportsFile });
-if (!config.adminToken) console.warn('[hazard-reports] ADMIN_TOKEN is not set - driver reports are collected but cannot be reviewed or published');
-
+app.disable('x-powered-by');
+// Behind a reverse proxy (Render, Nginx) req.ip is the client only with this set.
+app.set('trust proxy', config.trustProxy);
 app.use(cors({ origin: config.corsOrigin }));
 app.use(express.json({ limit: '100kb' }));
 
@@ -73,12 +116,18 @@ app.get('/api/client-config', (req, res) => {
 });
 
 app.use('/api', createDocsRoutes());
+app.use('/api/v1', navigation.router);
 
+app.use('/api/streams', createStreamRoutes(
+  createStreamController(streams, {
+    hasIntersection: (id) => service.has(id),
+    secrets: [config.trafficIngestToken, config.streamAdminToken],
+  }),
+  { ingestToken: config.trafficIngestToken, adminToken: config.streamAdminToken },
+));
 app.use('/api/simulation', createSimulationRoutes(simulationReadController, createSimulationController(simulation)));
 app.use('/api', createTrafficRoutes(controller));
-app.use('/api', createHazardRoutes(createHazardController(hazardReports, { adminToken: config.adminToken })));
-app.use('/api', createOsmRoutes(createOsmProxyService({ urls: config.overpassUrls, userAgent: config.overpassUserAgent })));
-app.use('/api', (req, res) => res.status(404).json({ ok: false, error: `No route ${req.method} ${req.originalUrl}` }));
+app.use('/api', (req, res) => res.status(404).json({ ok: false, code: 'NOT_FOUND', error: `No route ${req.method} ${req.originalUrl}` }));
 
 // Frontend + its two rendering libraries, served locally so the 3D view
 // works without a CDN (map tiles still come from openstreetmap.org).
@@ -89,17 +138,20 @@ app.use(express.static(FRONTEND_DIR));
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed') {
-    return res.status(400).json({ ok: false, error: 'Malformed JSON body' });
+    return res.status(400).json({ ok: false, code: 'MALFORMED_JSON', error: 'Malformed JSON body' });
   }
   if (err.type === 'entity.too.large') {
-    return res.status(413).json({ ok: false, error: 'Payload too large' });
+    return res.status(413).json({ ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'Payload too large' });
   }
   console.error('[server] unhandled error:', err);
-  return res.status(500).json({ ok: false, error: 'Internal server error' });
+  return res.status(500).json({ ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
 });
 
-initTrafficSocket(server, service, { corsOrigin: config.corsOrigin, simulation });
+initTrafficSocket(server, service, {
+  corsOrigin: config.corsOrigin, simulation, streams, network,
+});
 service.start(250);
+network.start();
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
@@ -111,26 +163,26 @@ server.on('error', (err) => {
 
 server.listen(config.port, () => {
   console.log('');
-  console.log('  Smart Traffic AI - control backend (simulation prototype)');
+  console.log('  Smart Traffic AI - control backend');
   console.log(`  Swagger     http://localhost:${config.port}/api/docs/`);
   console.log(`  Dashboard   http://localhost:${config.port}`);
   console.log(`  API         http://localhost:${config.port}/api/health`);
-  console.log(`  Navigation  http://localhost:${config.port}/navigation.html`);
-  console.log(`  Reports     http://localhost:${config.port}/admin.html`);
+  console.log(`  Mobile API  http://localhost:${config.port}/api/v1/config`);
   console.log(`  Ingest      POST http://localhost:${config.port}/api/traffic`);
   console.log(`  Intersections: ${service.ids().join(', ')}`);
   console.log('');
+  for (const warning of navigationWarnings(config.navigation)) console.warn(`[navigation] ${warning}`);
 });
 
 async function shutdown() {
   service.stop();
+  network.stop();
   simulation.pause();
   if (history) history.stop();
   if (simulationHistory) simulationHistory.stop();
   server.close();
   setTimeout(() => process.exit(0), 3000).unref();
   // Finish in-flight history writes; open Socket.IO clients do not delay this.
-  await hazardReports.flush();
   if (history) await history.flush();
   if (simulationHistory) await simulationHistory.flush();
   await disconnectDatabase().catch(() => {});
