@@ -74,6 +74,8 @@ Emergency corridor: `EMERGENCY_CORRIDOR_LENGTH` (3),
 |---|---|---|
 | `DEVICE_TOKEN_SECRET` | unset | HMAC-SHA256 key for device tokens; 32+ random characters. Unset: a per-process key (logged warning): every token stops working at each restart and apps must re-register. **Required in production.** Changing it invalidates all tokens (apps re-register automatically). |
 | `DEVICE_TOKEN_TTL_DAYS` | `30` | Device token lifetime (minimum 1 hour) |
+| `USER_TOKEN_SECRET` | unset | HMAC-SHA256 key for user tokens (`/auth/signup`, `/auth/login`); 32+ random characters, different from `DEVICE_TOKEN_SECRET`. Unset: a per-process key (logged warning): users are signed out at each restart. **Required in production.** Changing it signs every user out. |
+| `USER_TOKEN_TTL_DAYS` | `7` | User token lifetime (minimum 1 hour); the user signs in again afterwards |
 | `NAV_ADMIN_TOKEN` | unset | Bearer token for `POST/PATCH/DELETE /api/v1/road-features` and `PATCH /api/v1/reports/{id}`. Unset: those answer `503 FEATURE_DISABLED`. Operator tools only, never in the app. |
 
 ### Providers
@@ -146,6 +148,9 @@ In-memory, per backend instance. Per client IP unless noted.
 | `RATE_LIMIT_DEVICE_REGISTRATIONS_PER_HOUR` | `10` |
 | `RATE_LIMIT_REPORTS_PER_HOUR` | `10` per device |
 | `RATE_LIMIT_VOTES_PER_HOUR` | `60` per device |
+| `RATE_LIMIT_SIGNUPS_PER_HOUR` | `10` per IP |
+| `RATE_LIMIT_LOGINS_PER_HOUR` | `30` per IP |
+| `RATE_LIMIT_LOGINS_PER_ACCOUNT_PER_HOUR` | `10` per email |
 
 Mobile users behind one carrier NAT share an IP address; raise the per-IP
 limits if legitimate users hit them (watch for `429` in the logs).

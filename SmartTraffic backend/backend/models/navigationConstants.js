@@ -54,6 +54,12 @@ const LIMITS = {
   // Widest map area (degrees per side) one road-feature or report query may cover.
   maxBBoxSpanDeg: 0.5,
   maxListResults: 500,
+  // User accounts (POST /api/v1/auth/signup).
+  emailMaxLength: 254,
+  userNameMaxLength: 80,
+  passwordMinLength: 8,
+  // Upper bound keeps hashing cost bounded for hostile input.
+  passwordMaxLength: 128,
 };
 
 module.exports = {

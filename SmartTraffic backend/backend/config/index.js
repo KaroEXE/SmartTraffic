@@ -13,6 +13,15 @@ function num(name, fallback) {
   return value;
 }
 
+function adminToken() {
+  const raw = (process.env.ADMIN_TOKEN || '').trim();
+  if (raw && raw.length < 16) {
+    console.warn('[config] ADMIN_TOKEN is shorter than 16 characters - road report review is disabled');
+    return '';
+  }
+  return raw;
+}
+
 function httpUrl(name) {
   const raw = (process.env[name] || '').trim();
   if (!raw) return '';
@@ -111,6 +120,13 @@ const config = {
   // Bearer token for camera stream management (POST/PATCH/DELETE
   // /api/streams). Empty = stream management is disabled. Never log it.
   streamAdminToken: (process.env.STREAM_ADMIN_TOKEN || '').trim(),
+  // Secret for the road-report review page (admin.html). Empty = reviewing
+  // is disabled and nothing drivers report is ever published. Never log it.
+  adminToken: adminToken(),
+  // Driver road reports of the web navigation map (pending, approved,
+  // rejected). Plain JSON file so it works without MongoDB.
+  hazardReportsFile: (process.env.HAZARD_REPORTS_FILE || '').trim()
+    || path.join(__dirname, '..', 'data', 'hazard-reports.json'),
   // History sampling: at most one stored traffic record per intersection per
   // this many seconds of capture time (0 = store every observation). Changes
   // in emergency, pedestrians or stream attribution are always stored.
@@ -178,6 +194,11 @@ const config = {
     // per-process secret: tokens stop working at every restart. Never log it.
     deviceTokenSecret: (process.env.DEVICE_TOKEN_SECRET || '').trim(),
     deviceTokenTtlSeconds: Math.max(3600, num('DEVICE_TOKEN_TTL_DAYS', 30) * 86400),
+    // HMAC secret that signs user tokens (/auth/signup, /auth/login), >= 32
+    // characters, different from DEVICE_TOKEN_SECRET. Empty = a per-process
+    // secret: users are signed out at every restart. Never log it.
+    userTokenSecret: (process.env.USER_TOKEN_SECRET || '').trim(),
+    userTokenTtlSeconds: Math.max(3600, num('USER_TOKEN_TTL_DAYS', 7) * 86400),
     // Identifies this backend to the OSM services, as their usage policies require.
     userAgent: `SmartTraffic-Navigation/${PACKAGE_VERSION}${contactEmail ? ` (${contactEmail})` : ''}`,
     contactEmail,
@@ -268,6 +289,9 @@ const config = {
       deviceRegistrationsPerHour: Math.max(1, num('RATE_LIMIT_DEVICE_REGISTRATIONS_PER_HOUR', 10)),
       reportsPerHour: Math.max(1, num('RATE_LIMIT_REPORTS_PER_HOUR', 10)), // per device
       votesPerHour: Math.max(1, num('RATE_LIMIT_VOTES_PER_HOUR', 60)), // per device
+      signupsPerHour: Math.max(1, num('RATE_LIMIT_SIGNUPS_PER_HOUR', 10)), // per IP
+      loginsPerHour: Math.max(1, num('RATE_LIMIT_LOGINS_PER_HOUR', 30)), // per IP
+      loginsPerAccountPerHour: Math.max(1, num('RATE_LIMIT_LOGINS_PER_ACCOUNT_PER_HOUR', 10)), // per email
     },
   },
 };

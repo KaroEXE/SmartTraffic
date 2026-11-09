@@ -686,6 +686,16 @@ These are app-side decisions or not available yet:
   Ask the backend developer for an environment with the AI feed running
   when you need to see `live` data.
 - **Reports** need the database. `GET /config` shows whether it is up.
+- **Demo data**: the backend developer runs `npm run seed:demo` (in
+  `backend/`). It puts 6 community reports and 4 road features in
+  Sulaymaniyah, inside `south=35.54&west=45.40&north=35.58&east=45.46`.
+  Three of the reports lie on the route `35.5617,45.4329 → 35.5702,45.4418`,
+  so `POST /routes` returns them as `roadAlerts`. The script also prints a
+  token for a demo device that owns two of the reports (`mine: true`). The
+  app does not need it: it registers its own device with `POST /auth/device`,
+  and a report it sends appears straight away in `GET /reports` for that
+  area. A report within 75 m of an active one of the same type confirms
+  that one instead of adding a pin (`merged: true`).
 
 ## 11. Mobile integration checklist
 

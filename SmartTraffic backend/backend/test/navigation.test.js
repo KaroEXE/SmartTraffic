@@ -361,3 +361,19 @@ test('formatting', async () => {
   assert.equal(formatAge(4.4), '4 s ago');
   assert.equal(formatAge(null), 'never');
 });
+
+test('operator road features become verified hazards; unknown kinds and bad positions are dropped', async () => {
+  const { parseRoadFeatures } = await load('hazardService.js');
+  const out = parseRoadFeatures({ features: [
+    { id: 'a', kind: 'speed_camera', lat: 35.56, lng: 45.43, name: 'Camera on Salim St', speedLimitKmh: 60, source: 'City traffic dept', updatedAt: '2026-11-09T10:00:00.000Z' },
+    { id: 'b', kind: 'speed_bump', lat: 35.57, lng: 45.44, name: null },
+    { id: 'c', kind: 'roadworks', lat: 35.57, lng: 45.44 },
+    { id: 'd', kind: 'road_closure', lat: 135, lng: 45.44 },
+  ] });
+  assert.deepEqual(out.map((h) => [h.id, h.kind, h.label, h.verification]), [
+    ['operator-a', 'speed_camera', 'Camera on Salim St', 'verified'],
+    ['operator-b', 'speed_bump', 'Speed bump', 'verified'],
+  ]);
+  assert.equal(out[0].details.maxspeed, '60');
+  assert.equal(out[1].source, 'SmartTraffic operator');
+});

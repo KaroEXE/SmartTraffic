@@ -39,7 +39,9 @@ const MAY_LOAD_SIMULATION = new Set([
 ]);
 
 test('random numbers exist only in the simulator', () => {
-  const hits = files.filter((f) => /Math\.random|crypto\.random(?!UUID)|randomInt/.test(source(f)));
+  // Password salts are security randomness, not data shown anywhere.
+  const SECURITY_RANDOMNESS = new Set(['backend/utils/password.js']);
+  const hits = files.filter((f) => !SECURITY_RANDOMNESS.has(rel(f)) && /Math\.random|crypto\.random(?!UUID)|randomInt/.test(source(f)));
   assert.deepEqual(hits.map(rel), [SIMULATOR]);
 });
 

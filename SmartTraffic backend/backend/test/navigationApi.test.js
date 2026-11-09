@@ -344,7 +344,9 @@ test('Swagger documents every /api/v1 route, with valid references, security and
   const router = createNavigationRoutes({
     navigationController: controller,
     roadDataController: controller,
+    authController: controller,
     deviceTokens: { verify: () => ({ ok: false }) },
+    userTokens: { verify: () => ({ ok: false }) },
     adminToken: 'x',
     rateLimits: api.config.navigation.rateLimits,
   });

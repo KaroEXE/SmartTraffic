@@ -8,7 +8,8 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test",
-    "smoke": "node scripts/smokeNavigation.js"
+    "smoke": "node scripts/smokeNavigation.js",
+    "seed:demo": "node scripts/seedDemo.js"
   },
   "engines": {
     "node": ">=18"

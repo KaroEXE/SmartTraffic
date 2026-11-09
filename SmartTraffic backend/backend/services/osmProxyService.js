@@ -98,7 +98,10 @@ function createOsmProxyService({
       const hit = cache.get(key);
       if (hit && now() - hit.at < cacheTtlMs) return hit.json;
       if (inFlight.has(key)) return inFlight.get(key);
+      // While every Overpass instance is down, the last good answer for this
+      // area (however old; map data changes slowly) beats an error.
       if (failedAt !== null && now() - failedAt < failureTtlMs) {
+        if (hit) return hit.json;
         throw new OsmError('upstream', 'OpenStreetMap data service not reachable');
       }
 
@@ -110,7 +113,10 @@ function createOsmProxyService({
         remember(key, json);
         return json;
       } catch (err) {
-        if (err instanceof OsmError) failedAt = now();
+        if (err instanceof OsmError) {
+          failedAt = now();
+          if (hit) return hit.json;
+        }
         throw err;
       } finally {
         inFlight.delete(key);

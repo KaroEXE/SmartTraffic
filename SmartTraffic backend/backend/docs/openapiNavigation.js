@@ -40,6 +40,7 @@ module.exports = function navigationSpec({
         description: 'Stable machine-readable error code. Switch on this, not on `error`.',
         enum: ['INVALID_REQUEST', 'MALFORMED_JSON', 'UNSUPPORTED_MEDIA_TYPE', 'PAYLOAD_TOO_LARGE', 'NOT_FOUND',
           'DEVICE_TOKEN_REQUIRED', 'DEVICE_TOKEN_INVALID', 'DEVICE_TOKEN_EXPIRED', 'ADMIN_TOKEN_INVALID',
+          'EMAIL_TAKEN', 'INVALID_CREDENTIALS', 'WRONG_PASSWORD','USER_TOKEN_REQUIRED', 'USER_TOKEN_INVALID', 'USER_TOKEN_EXPIRED',
           'CANNOT_VOTE_OWN_REPORT', 'NOT_REPORT_OWNER', 'ALREADY_VOTED', 'REPORT_NOT_ACTIVE', 'DUPLICATE_REPORT',
           'REPORT_LIMIT_REACHED', 'RATE_LIMITED', 'NO_ROUTE', 'POINT_NOT_ROUTABLE',
           'PROVIDER_ERROR', 'PROVIDER_UNREACHABLE', 'PROVIDER_TIMEOUT', 'PROVIDER_BUSY',
@@ -69,6 +70,18 @@ module.exports = function navigationSpec({
       issuedAt: date,
       expiresAt: date,
     }, ['deviceId', 'expiresAt']),
+    User: object({
+      id: objectId,
+      email: { type: 'string', format: 'email', example: 'driver@example.com' },
+      name: nullable({ type: 'string', maxLength: LIMITS.userNameMaxLength, example: 'Sara' }),
+      createdAt: date,
+    }, ['id', 'email', 'name', 'createdAt']),
+    UserSession: ok({
+      tokenType: enumOf(['Bearer']),
+      token: { type: 'string', description: 'User token (JWT). Store it securely and send it as "Authorization: Bearer <token>".' },
+      expiresAt: date,
+      user: ref('User'),
+    }, ['tokenType', 'token', 'expiresAt', 'user']),
 
     Place: object({
       id: { type: 'string', example: 'osm:way:123456' },
@@ -212,7 +225,7 @@ module.exports = function navigationSpec({
     paths[path][method] = spec;
   };
   const tags = {
-    app: 'Mobile: app', places: 'Mobile: places', routes: 'Mobile: routes', traffic: 'Mobile: traffic',
+    app: 'Mobile: app', account: 'Mobile: account', places: 'Mobile: places', routes: 'Mobile: routes', traffic: 'Mobile: traffic',
     features: 'Mobile: road features', reports: 'Mobile: community reports',
   };
 
@@ -235,6 +248,126 @@ module.exports = function navigationSpec({
     responses: {
       201: response('New device token', ref('DeviceToken')), 200: response('Renewed (or still valid) token', ref('DeviceToken')),
       400: error('Invalid body'), 401: error('A token was sent but is invalid or expired: call again without it'), 429: rateLimited,
+    },
+  });
+
+  const credentialsRules = `Email is trimmed and compared case-insensitively. Password: ${LIMITS.passwordMinLength}-${LIMITS.passwordMaxLength} characters with at least one letter and one digit.`;
+  op('/api/v1/auth/signup', 'post', {
+    tags: [tags.account], operationId: 'signup', summary: 'Create a user account (and sign in)',
+    description: `Creates the account and answers with a session, so the app is signed in right away. ${credentialsRules} Passwords are stored as salted scrypt hashes. Rate limited per IP. Needs MongoDB (503 DATABASE_UNAVAILABLE without it).`,
+    security: [],
+    requestBody: {
+      required: true,
+      content: json(object({
+        email: { type: 'string', format: 'email', maxLength: LIMITS.emailMaxLength },
+        password: {
+          type: 'string', format: 'password', minLength: LIMITS.passwordMinLength, maxLength: LIMITS.passwordMaxLength,
+        },
+        name: nullable({ type: 'string', maxLength: LIMITS.userNameMaxLength }),
+      }, ['email', 'password']), {
+        signup: { value: { email: 'driver@example.com', password: 'Secret123', name: 'Sara' } },
+      }),
+    },
+    responses: {
+      201: response('Account created; signed in', ref('UserSession')),
+      400: error('Invalid body (INVALID_REQUEST, e.g. weak password)'), 409: error('EMAIL_TAKEN: sign in instead'),
+      429: rateLimited, 503: error('Database not connected'),
+    },
+  });
+
+  op('/api/v1/auth/login', 'post', {
+    tags: [tags.account], operationId: 'login', summary: 'Sign in with email and password',
+    description: 'Answers with a new session. A wrong password and an unknown email give the same 401 INVALID_CREDENTIALS. Rate limited per IP and per account. Then click Authorize > userToken in Swagger and paste `token` to try GET /api/v1/auth/me.',
+    security: [],
+    requestBody: {
+      required: true,
+      content: json(object({
+        email: { type: 'string', format: 'email', maxLength: LIMITS.emailMaxLength },
+        password: { type: 'string', format: 'password', maxLength: LIMITS.passwordMaxLength },
+      }, ['email', 'password']), {
+        login: { value: { email: 'driver@example.com', password: 'Secret123' } },
+      }),
+    },
+    responses: {
+      200: response('Signed in', ref('UserSession')),
+      400: error('Invalid body'), 401: error('INVALID_CREDENTIALS'), 429: rateLimited, 503: error('Database not connected'),
+    },
+  });
+
+  const user = [{ userToken: [] }];
+  const signedOut = error('USER_TOKEN_REQUIRED, USER_TOKEN_INVALID (signed out, revoked or account deleted) or USER_TOKEN_EXPIRED: sign in again');
+  const userResponses = { 401: signedOut, 429: rateLimited, 503: error('Database not connected') };
+  const userBody = ok({ user: ref('User') }, ['user']);
+  const passwordField = { type: 'string', format: 'password', maxLength: LIMITS.passwordMaxLength };
+
+  op('/api/v1/auth/refresh', 'post', {
+    tags: [tags.account], operationId: 'refreshSession', summary: 'Exchange a still-valid user token for a fresh one',
+    description: 'Call when the app opens (or when `expiresAt` is near) to stay signed in. An expired token cannot be refreshed: sign in again. No body.',
+    security: user,
+    responses: { 200: response('New session', ref('UserSession')), ...userResponses },
+  });
+
+  op('/api/v1/auth/logout', 'post', {
+    tags: [tags.account], operationId: 'logout', summary: 'Sign out on every device',
+    description: 'Revokes every token of this account. Delete the stored token in the app too. No body.',
+    security: user,
+    responses: { 200: response('Signed out', ok({})), ...userResponses },
+  });
+
+  op('/api/v1/auth/change-password', 'post', {
+    tags: [tags.account], operationId: 'changePassword', summary: 'Change the password',
+    description: `Answers with a new session; replace the stored token with it. Every other device is signed out. ${credentialsRules} Rate limited per account.`,
+    security: user,
+    requestBody: {
+      required: true,
+      content: json(object({
+        currentPassword: passwordField,
+        newPassword: { ...passwordField, minLength: LIMITS.passwordMinLength },
+      }, ['currentPassword', 'newPassword']), {
+        change: { value: { currentPassword: 'Secret123', newPassword: 'NewSecret456' } },
+      }),
+    },
+    responses: {
+      200: response('Password changed; new session', ref('UserSession')),
+      400: error('Invalid body (INVALID_REQUEST, e.g. weak or unchanged password)'), 403: error('WRONG_PASSWORD: currentPassword is not correct'),
+      ...userResponses,
+    },
+  });
+
+  op('/api/v1/auth/me', 'get', {
+    tags: [tags.account], operationId: 'getMe', summary: 'The signed-in user',
+    description: 'Needs the user token from /auth/signup or /auth/login (not a device token).',
+    security: user,
+    responses: { 200: response('The user', userBody), ...userResponses },
+  });
+
+  op('/api/v1/auth/me', 'patch', {
+    tags: [tags.account], operationId: 'updateMe', summary: 'Change the profile name',
+    description: '`name: null` clears it. The email cannot be changed.',
+    security: user,
+    requestBody: {
+      required: true,
+      content: json(object({ name: nullable({ type: 'string', maxLength: LIMITS.userNameMaxLength }) }, ['name']), {
+        rename: { value: { name: 'Sara A.' } },
+      }),
+    },
+    responses: { 200: response('Updated user', userBody), 400: error('Invalid body'), ...userResponses },
+  });
+
+  op('/api/v1/auth/me', 'delete', {
+    tags: [tags.account], operationId: 'deleteMe', summary: 'Delete the account',
+    description: 'Permanently deletes the account after checking its password; every token stops working. Rate limited per account.',
+    security: user,
+    requestBody: {
+      required: true,
+      content: json(object({ password: passwordField }, ['password']), {
+        confirm: { value: { password: 'Secret123' } },
+      }),
+    },
+    responses: {
+      200: response('Deleted', ok({ deleted: { type: 'boolean', enum: [true] } }, ['deleted'])),
+      400: error('Invalid body'), 403: error('WRONG_PASSWORD'),
+      ...userResponses,
     },
   });
 
@@ -448,6 +581,9 @@ module.exports = function navigationSpec({
     securitySchemes: {
       deviceToken: {
         type: 'http', scheme: 'bearer', bearerFormat: 'JWT', description: 'Anonymous device token from POST /api/v1/auth/device.',
+      },
+      userToken: {
+        type: 'http', scheme: 'bearer', bearerFormat: 'JWT', description: 'User token (`token`) from POST /api/v1/auth/signup or /api/v1/auth/login.',
       },
       navAdminToken: {
         type: 'http', scheme: 'bearer', description: 'NAV_ADMIN_TOKEN (operator tools only - never in the mobile app).',

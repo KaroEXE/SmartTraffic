@@ -20,6 +20,11 @@ const { createStreamController } = require('./controllers/streamController');
 const { createTrafficRoutes, createSimulationRoutes, createStreamRoutes } = require('./routes/trafficRoutes');
 const { createDocsRoutes } = require('./routes/docsRoutes');
 const { createNavigationApi, navigationWarnings } = require('./services/navigation');
+const { createHazardReportService } = require('./services/hazardReportService');
+const { createHazardController } = require('./controllers/hazardController');
+const { createHazardRoutes } = require('./routes/hazardRoutes');
+const { createOsmProxyService } = require('./services/osmProxyService');
+const { createOsmRoutes } = require('./routes/osmRoutes');
 const { initTrafficSocket } = require('./socket/trafficSocket');
 
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
@@ -85,6 +90,13 @@ setTimeout(refreshStreams, 2_000).unref();
 // LIVE engine only; road features and reports are stored in MongoDB.
 const navigation = createNavigationApi({ config, engine: service });
 
+// WEB NAVIGATION MAP (frontend/navigation.html): driver road reports, shown
+// on the map only after approval on admin.html, and OpenStreetMap layers
+// fetched by the backend (Overpass refuses anonymous browser clients).
+const hazardReports = createHazardReportService({ file: config.hazardReportsFile });
+if (!config.adminToken) console.warn('[hazard-reports] ADMIN_TOKEN is not set - driver reports are collected but cannot be reviewed or published');
+const osmProxy = createOsmProxyService({ urls: config.navigation.overpass.urls, userAgent: config.navigation.userAgent });
+
 const controller = createTrafficController(service, {
   history,
   databaseHealth: () => ({
@@ -125,6 +137,8 @@ app.use('/api/streams', createStreamRoutes(
   }),
   { ingestToken: config.trafficIngestToken, adminToken: config.streamAdminToken },
 ));
+app.use('/api', createHazardRoutes(createHazardController(hazardReports, { adminToken: config.adminToken })));
+app.use('/api', createOsmRoutes(osmProxy));
 app.use('/api/simulation', createSimulationRoutes(simulationReadController, createSimulationController(simulation)));
 app.use('/api', createTrafficRoutes(controller));
 app.use('/api', (req, res) => res.status(404).json({ ok: false, code: 'NOT_FOUND', error: `No route ${req.method} ${req.originalUrl}` }));
@@ -169,6 +183,7 @@ server.listen(config.port, () => {
   console.log(`  API         http://localhost:${config.port}/api/health`);
   console.log(`  Mobile API  http://localhost:${config.port}/api/v1/config`);
   console.log(`  Ingest      POST http://localhost:${config.port}/api/traffic`);
+  console.log(`  Reports     http://localhost:${config.port}/admin.html`);
   console.log(`  Intersections: ${service.ids().join(', ')}`);
   console.log('');
   for (const warning of navigationWarnings(config.navigation)) console.warn(`[navigation] ${warning}`);
@@ -185,6 +200,7 @@ async function shutdown() {
   // Finish in-flight history writes; open Socket.IO clients do not delay this.
   if (history) await history.flush();
   if (simulationHistory) await simulationHistory.flush();
+  await hazardReports.flush();
   await disconnectDatabase().catch(() => {});
   process.exit(0);
 }

@@ -1,5 +1,8 @@
 const { isDatabaseConnected } = require('../../config/database');
 const { createDeviceTokens } = require('../../utils/deviceToken');
+const { createUserTokens } = require('../../utils/userToken');
+const { createUserAccountService } = require('./userAccountService');
+const { createAuthController } = require('../../controllers/authController');
 const { createGeocodingService } = require('./geocodingService');
 const { createOverpassService } = require('./overpassService');
 const { createRoutingService } = require('./routingService');
@@ -35,6 +38,10 @@ function createNavigationApi({
   const deviceTokens = createDeviceTokens({
     secret: nav.deviceTokenSecret, ttlSeconds: nav.deviceTokenTtlSeconds, now, log,
   });
+  const userTokens = createUserTokens({
+    secret: nav.userTokenSecret, ttlSeconds: nav.userTokenTtlSeconds, now, log,
+  });
+  const userAccounts = createUserAccountService({ User: models.User, isConnected });
   const geocoding = createGeocodingService({ config: { ...nav.geocoding, contactEmail: nav.contactEmail }, ...common });
   const overpass = createOverpassService({ config: nav.overpass, ...common });
   const routing = createRoutingService({ config: nav.routing, ...common, log });
@@ -53,15 +60,16 @@ function createNavigationApi({
   const roadDataController = createRoadDataController({
     roadFeatures, roadReports, overpass, log,
   });
+  const authController = createAuthController({ userAccounts, userTokens });
   const router = createNavigationRoutes({
-    navigationController, roadDataController, deviceTokens, adminToken: nav.adminToken, rateLimits: nav.rateLimits, now,
+    navigationController, roadDataController, authController, deviceTokens, userTokens, adminToken: nav.adminToken, rateLimits: nav.rateLimits, now,
   });
 
   return {
     router,
     health: navigationController.health,
     services: {
-      deviceTokens, geocoding, overpass, routing, liveTraffic, roadFeatures, roadReports, routePlanner,
+      deviceTokens, userTokens, userAccounts, geocoding, overpass, routing, liveTraffic, roadFeatures, roadReports, routePlanner,
     },
   };
 }

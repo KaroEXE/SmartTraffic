@@ -1,6 +1,8 @@
 const express = require('express');
 const { hasBearerToken } = require('../utils/auth');
 const { deviceAuth } = require('../utils/deviceToken');
+const { userAuth } = require('../utils/userToken');
+const { loginEmailKey } = require('../utils/navValidation');
 const { createRateLimiter } = require('../utils/rateLimit');
 const { handle, sendError } = require('../utils/apiError');
 
@@ -12,6 +14,7 @@ const { handle, sendError } = require('../utils/apiError');
  * Access
  *   public   no token
  *   device   "Authorization: Bearer <device token>" from POST /auth/device
+ *   user     "Authorization: Bearer <user token>" from POST /auth/signup or /auth/login
  *   admin    "Authorization: Bearer <NAV_ADMIN_TOKEN>" - operator tools only,
  *            never in the app; disabled (503) when NAV_ADMIN_TOKEN is not set
  *
@@ -20,7 +23,7 @@ const { handle, sendError } = require('../utils/apiError');
  * per-device limits on writes.
  */
 function createNavigationRoutes({
-  navigationController: nav, roadDataController: road, deviceTokens, adminToken, rateLimits, now = Date.now,
+  navigationController: nav, roadDataController: road, authController: auth, deviceTokens, userTokens, adminToken, rateLimits, now = Date.now,
 }) {
   const router = express.Router();
   const minute = 60_000;
@@ -37,9 +40,16 @@ function createNavigationRoutes({
   const registrations = limit('device registration', hour, rateLimits.deviceRegistrationsPerHour);
   const reports = limit('report', hour, rateLimits.reportsPerHour, perDevice);
   const votes = limit('vote', hour, rateLimits.votesPerHour, perDevice);
+  const signups = limit('sign-up', hour, rateLimits.signupsPerHour);
+  const logins = limit('sign-in', hour, rateLimits.loginsPerHour);
+  // Per account too, so one account's password cannot be guessed from many IPs.
+  const accountLogins = limit('sign-in', hour, rateLimits.loginsPerAccountPerHour, (req) => loginEmailKey(req.body));
+  // Password checks of a signed-in user (change password, delete account).
+  const passwordChecks = limit('password check', hour, rateLimits.loginsPerAccountPerHour, (req) => req.userId || null);
 
   const device = deviceAuth(deviceTokens, { required: true });
   const optionalDevice = deviceAuth(deviceTokens, { required: false });
+  const user = userAuth(userTokens);
   const admin = (req, res, next) => {
     if (!adminToken) return sendError(res, 503, 'FEATURE_DISABLED', 'Administration is disabled: set NAV_ADMIN_TOKEN on the backend');
     if (!hasBearerToken(req, adminToken)) {
@@ -58,6 +68,14 @@ function createNavigationRoutes({
 
   router.get('/config', handle(nav.config));
   router.post('/auth/device', registrations, optionalDevice, handle(nav.registerDevice));
+  router.post('/auth/signup', signups, handle(auth.signup));
+  router.post('/auth/login', logins, accountLogins, handle(auth.login));
+  router.post('/auth/refresh', user, handle(auth.refresh));
+  router.post('/auth/logout', user, handle(auth.logout));
+  router.post('/auth/change-password', user, passwordChecks, handle(auth.changePassword));
+  router.get('/auth/me', user, handle(auth.me));
+  router.patch('/auth/me', user, handle(auth.updateMe));
+  router.delete('/auth/me', user, passwordChecks, handle(auth.deleteMe));
 
   router.get('/places/search', search, handle(nav.searchPlaces));
   router.get('/places/reverse', search, handle(nav.reversePlace));

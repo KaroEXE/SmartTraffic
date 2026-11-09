@@ -70,3 +70,15 @@ test('HTTP: bad layer or area is refused; all instances down is a 502', async ()
     await new Promise((r) => server.close(r));
   }
 });
+
+test('during an outage the last good answer for the area is served, however old', async () => {
+  const { calls, fetchImpl } = stubFetch([{ status: 200, body: { elements: [{ type: 'node', id: 7 }] } }, new TypeError('fetch failed')]);
+  let now = 0;
+  const osm = createOsmProxyService({ urls: ['https://a.example'], userAgent: UA, fetchImpl, now: () => now, cacheTtlMs: 1000 });
+  assert.deepEqual(await osm.fetchLayer('hazards', BBOX), { elements: [{ type: 'node', id: 7 }] });
+  now += 5000; // stale, so it is refreshed - and the refresh fails
+  assert.deepEqual(await osm.fetchLayer('hazards', BBOX), { elements: [{ type: 'node', id: 7 }] }, 'stale answer instead of an error');
+  assert.deepEqual(await osm.fetchLayer('hazards', BBOX), { elements: [{ type: 'node', id: 7 }] }, 'and again without asking upstream');
+  assert.equal(calls.length, 2);
+  await assert.rejects(osm.fetchLayer('places', BBOX), (e) => e.code === 'upstream', 'nothing stored for another layer');
+});

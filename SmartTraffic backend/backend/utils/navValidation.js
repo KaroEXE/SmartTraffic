@@ -177,6 +177,95 @@ function validateDeviceRegistration(body) {
   return result(errors, { platform, appVersion });
 }
 
+// Practical address check (one @, a dot in the domain, no spaces); the
+// mailbox is not verified.
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function checkEmail(errors, body) {
+  if (typeof body.email !== 'string') { errors.push('email is required'); return null; }
+  const email = body.email.trim().toLowerCase();
+  if (email.length > LIMITS.emailMaxLength || !EMAIL.test(email)) { errors.push('email must be a valid email address'); return null; }
+  return email;
+}
+
+/** A password being set: length and letter + digit rules. */
+function checkNewPassword(errors, body, key) {
+  const password = body[key];
+  if (typeof password !== 'string') errors.push(`${key} is required`);
+  else if (password.length < LIMITS.passwordMinLength || password.length > LIMITS.passwordMaxLength) {
+    errors.push(`${key} must be ${LIMITS.passwordMinLength} to ${LIMITS.passwordMaxLength} characters`);
+  } else if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) errors.push(`${key} must contain at least one letter and one digit`);
+  return password;
+}
+
+/** A password being checked against the stored one: only presence and size. */
+function checkGivenPassword(errors, body, key) {
+  const password = body[key];
+  if (typeof password !== 'string' || !password) errors.push(`${key} is required`);
+  else if (password.length > LIMITS.passwordMaxLength) errors.push(`${key} may be at most ${LIMITS.passwordMaxLength} characters`);
+  return password;
+}
+
+/** POST /api/v1/auth/signup { email, password, name? } */
+function validateSignup(body) {
+  if (!isPlainObject(body)) return { errors: ['body must be a JSON object'] };
+  const errors = [];
+  unknownKeys(errors, body, ['email', 'password', 'name']);
+  const email = checkEmail(errors, body);
+  const password = checkNewPassword(errors, body, 'password');
+  const out = { name: null };
+  optionalText(errors, body, 'name', LIMITS.userNameMaxLength, out);
+  return result(errors, { email, password, name: out.name });
+}
+
+/** POST /api/v1/auth/login { email, password } */
+function validateLogin(body) {
+  if (!isPlainObject(body)) return { errors: ['body must be a JSON object'] };
+  const errors = [];
+  unknownKeys(errors, body, ['email', 'password']);
+  const email = checkEmail(errors, body);
+  const password = checkGivenPassword(errors, body, 'password');
+  return result(errors, { email, password });
+}
+
+/** PATCH /api/v1/auth/me { name } (null clears it) */
+function validateProfileUpdate(body) {
+  if (!isPlainObject(body)) return { errors: ['body must be a JSON object'] };
+  const errors = [];
+  unknownKeys(errors, body, ['name']);
+  if (body.name === undefined) errors.push('name is required (null clears it)');
+  const out = { name: null };
+  optionalText(errors, body, 'name', LIMITS.userNameMaxLength, out);
+  return result(errors, { name: out.name });
+}
+
+/** POST /api/v1/auth/change-password { currentPassword, newPassword } */
+function validatePasswordChange(body) {
+  if (!isPlainObject(body)) return { errors: ['body must be a JSON object'] };
+  const errors = [];
+  unknownKeys(errors, body, ['currentPassword', 'newPassword']);
+  const currentPassword = checkGivenPassword(errors, body, 'currentPassword');
+  const newPassword = checkNewPassword(errors, body, 'newPassword');
+  if (!errors.length && currentPassword === newPassword) errors.push('newPassword must differ from currentPassword');
+  return result(errors, { currentPassword, newPassword });
+}
+
+/** DELETE /api/v1/auth/me { password } */
+function validateAccountDeletion(body) {
+  if (!isPlainObject(body)) return { errors: ['body must be a JSON object'] };
+  const errors = [];
+  unknownKeys(errors, body, ['password']);
+  const password = checkGivenPassword(errors, body, 'password');
+  return result(errors, { password });
+}
+
+/** Lower-cased email of a login body, or null (per-account rate limit key). */
+function loginEmailKey(body) {
+  if (!isPlainObject(body) || typeof body.email !== 'string') return null;
+  const email = body.email.trim().toLowerCase();
+  return email && email.length <= LIMITS.emailMaxLength ? email : null;
+}
+
 /** POST /api/v1/reports */
 function validateReportInput(body) {
   if (!isPlainObject(body)) return { errors: ['body must be a JSON object'] };
@@ -291,6 +380,12 @@ module.exports = {
   checkObjectId,
   validateRouteRequest,
   validateDeviceRegistration,
+  validateSignup,
+  validateLogin,
+  validateProfileUpdate,
+  validatePasswordChange,
+  validateAccountDeletion,
+  loginEmailKey,
   validateReportInput,
   validateVote,
   validateModeration,

@@ -159,6 +159,7 @@ function testConfig(providers, overrides = {}) {
     rateLimits: {
       perMinute: 10_000, searchPerMinute: 10_000, routesPerMinute: 10_000, placesPerMinute: 10_000,
       deviceRegistrationsPerHour: 10_000, reportsPerHour: 10_000, votesPerHour: 10_000,
+      signupsPerHour: 10_000, loginsPerHour: 10_000, loginsPerAccountPerHour: 10_000,
     },
   };
   for (const [key, value] of Object.entries(overrides)) {
