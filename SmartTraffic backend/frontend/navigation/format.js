@@ -1,4 +1,4 @@
-/** Display formatting (no DOM). */
+  /** Display formatting (no DOM). */
 
 const DIRECTION_LABEL = { north: 'north', south: 'south', east: 'east', west: 'west' };
 
@@ -11,6 +11,8 @@ export function formatDuration(seconds) {
   const m = minutes % 60;
   return m ? `${h} h ${m} min` : `${h} h`;
 }
+
+//format distance may change from time to time based on the city so we have to take a look into it.
 
 export function formatDistance(meters) {
   if (!Number.isFinite(meters) || meters < 0) return '-';

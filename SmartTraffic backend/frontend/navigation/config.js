@@ -46,20 +46,43 @@ export const NAV_CONFIG = Object.freeze({
   },
 
   hazards: {
-    // 'overpass' = OpenStreetMap data via the Overpass API.
-    // 'backend'  = project endpoint returning { hazards: [...] } (see README).
-    provider: 'overpass',
-    // Tried in order. Instances must send CORS headers to work from a browser.
-    overpassUrls: [
-      'https://overpass-api.de/api/interpreter',
-      'https://overpass.private.coffee/api/interpreter',
-    ],
-    backendUrl: null,
+    // OpenStreetMap speed cameras and bumps through the backend's Overpass
+    // proxy (backend/routes/osmRoutes.js), which builds the query with
+    // buildOverpassQuery() and maxResults below. The Overpass instances it
+    // uses are OVERPASS_URLS in backend/.env.
+    osmUrl: '/api/osm/hazards',
     minZoom: 13, // below this the visible area is too large to query
     maxResults: 500,
-    timeoutMs: 25000,
+    // The backend tries each Overpass instance for up to 25 s.
+    timeoutMs: 55000,
     retryAfterMs: 30000,
     debounceMs: 700,
+  },
+
+  reports: {
+    // Drivers' reports approved on admin.html (backend GET /api/hazards).
+    backendUrl: '/api/hazards',
+    minZoom: 0, // a few hundred points at most, so any zoom
+    maxAgeMs: 60000, // reloaded once older, so newly approved reports appear
+    retryAfterMs: 30000,
+    debounceMs: 700,
+  },
+
+  roadFeatures: {
+    // Speed cameras, bumps and closures entered by the operator (backend
+    // GET /api/v1/road-features, database only - works without OpenStreetMap).
+    url: '/api/v1/road-features',
+    minZoom: 12, // the endpoint refuses areas wider than 0.5 degrees
+    maxAgeMs: 60000,
+    retryAfterMs: 30000,
+    debounceMs: 700,
+  },
+
+  places: {
+    // Important places (placesService.js) through the same backend proxy.
+    osmUrl: '/api/osm/places',
+    maxResults: 300,
+    timeoutMs: 55000,
   },
 
   map: {
@@ -69,6 +92,16 @@ export const NAV_CONFIG = Object.freeze({
     maxZoom: 19,
     // Only used when the intersection list cannot be loaded.
     fallbackView: { lat: 35.5617, lng: 45.4329, zoom: 14 },
+    // Areas for an area picker: the whole Kurdistan Region (bounds
+    // [[south, west], [north, east]]) and its main cities (centre + zoom).
+    defaultRegion: 'kurdistan',
+    regions: [
+      { id: 'kurdistan', name: 'Kurdistan Region', bounds: [[34.4, 42.3], [37.4, 46.4]] },
+      { id: 'erbil', name: 'Erbil', lat: 36.1911, lng: 44.0092, zoom: 13 },
+      { id: 'sulaymaniyah', name: 'Sulaymaniyah', lat: 35.5617, lng: 45.4329, zoom: 13 },
+      { id: 'duhok', name: 'Duhok', lat: 36.8671, lng: 42.9885, zoom: 13 },
+      { id: 'halabja', name: 'Halabja', lat: 35.1778, lng: 45.9861, zoom: 14 },
+    ],
   },
 
   traffic: {

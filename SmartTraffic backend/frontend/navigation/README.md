@@ -57,11 +57,18 @@ The route list is the legend: tapping an entry or a line highlights it.
 | Map tiles | tile.openstreetmap.org (same as dashboard) | OSM tile usage policy, attribution shown |
 | Routing | router.project-osrm.org (OSRM demo) | Demo server, no SLA, ~1 request/s |
 | Search | nominatim.openstreetmap.org | Max 1 request/s, no search-as-you-type (search runs on submit) |
-| Hazards | Overpass API (OSM `highway=speed_camera`, `traffic_calming=bump/hump/table/cushion`) | Public instances are often busy; the page says "unavailable" when they fail |
+| Hazards | Overpass API (OSM `highway=speed_camera`, `traffic_calming=bump/hump/yes/table/cushion`), fetched by the backend (`GET /api/osm/hazards`) | Public instances are often busy; the page says "unavailable" when they fail |
 
-For production, point `config.js` at self-hosted or commercial instances.
-OpenStreetMap hazard data is community-mapped, often incomplete, and shown
-as "not verified by SmartTraffic". Road closures have no data source yet.
+For production, point `config.js` (and `OVERPASS_URLS` in `backend/.env`)
+at self-hosted or commercial instances. OpenStreetMap hazard data is
+community-mapped, often incomplete, and shown as "not verified by
+SmartTraffic".
+
+**Driver reports** (speed cameras, speed bumps, road closures) come from
+the backend's `GET /api/hazards`: reports sent to `POST /api/hazards/reports`
+appear on the map only after an administrator approves them on
+`/admin.html` (password: `ADMIN_TOKEN` in `backend/.env`). They are loaded at
+any zoom and reloaded every minute (`reports` in `config.js`).
 
 ## Live traffic: fields the page reads
 
@@ -113,7 +120,8 @@ fails, OSRM routes are shown with "Live traffic data unavailable". While
 routes come from the backend, they are re-requested when traffic changes
 (at most every `trafficRefreshMs`).
 
-**Hazards**: set `hazards.provider: 'backend'` and `hazards.backendUrl`.
+**Hazards** (implemented by `GET /api/hazards`; `reports.backendUrl` in
+`config.js`). Any service with this contract can replace it:
 
 ```
 GET <backendUrl>?south=&west=&north=&east=

@@ -8,7 +8,9 @@ import { createGeocoder } from './geocoder.js';
 import { planRoutes, findMoreRoutes, RouteError } from './routeService.js';
 import { estimateRoute, orderRoutes, liveStatus } from './routeRanking.js';
 import { matchRouteToTraffic, findRerouteSuggestion } from './routeTraffic.js';
-import { createHazardProvider, createHazardLoader } from './hazardService.js';
+import {
+  createOverpassProvider, createBackendProvider, createRoadFeatureProvider, createHazardLoader,
+} from './hazardService.js';
 import { createTrafficStore } from './trafficStore.js';
 import { connectTrafficFeed, disconnectTrafficFeed, feedDiagnostics } from './trafficFeed.js';
 import { formatCoords } from './format.js';
@@ -49,9 +51,8 @@ let panel;
 let layers;
 let search;
 let status;
-let hazardLoader;
-let hazardState = { status: 'idle', hazards: [] };
-let hazardKinds = [];
+// OpenStreetMap features and approved driver reports: { provider, loader, state }
+let hazardSources = [];
 let renderTimer = null;
 
 // --------------------------------------------------------------- layout
@@ -340,43 +341,53 @@ async function loadIntersections() {
 
 const HAZARD_IDS = ['speed_camera', 'speed_bump', 'road_closure'];
 
-function hazardLayersOn() {
-  return hazardKinds.some((id) => layers.isOn(id));
+const inView = (bbox, h) => bboxContains(bbox, { south: h.lat, north: h.lat, west: h.lng, east: h.lng });
+const sourcesOf = (id) => hazardSources.filter((s) => s.provider.kinds.includes(id));
+
+/** True when a layer of `source` (default: of any source) is switched on. */
+function hazardLayersOn(source = null) {
+  const kinds = source ? source.provider.kinds : hazardSources.flatMap((s) => s.provider.kinds);
+  return kinds.some((id) => layers.isOn(id));
 }
 
-function onHazardState(next) {
-  hazardState = next;
-  map.setHazards(next.hazards);
+/** One layer's status line, from every source that provides that kind. */
+function hazardStatusText(id, view) {
+  const sources = sourcesOf(id);
+  const statuses = sources.map((s) => s.state.status);
+  const shown = sources.flatMap((s) => s.state.hazards).filter((h) => h.kind === id && inView(view.bbox, h));
+  if (shown.length) {
+    const from = [...new Set(shown.map((h) => h.source))].join(', ');
+    return `${shown.length} in view (${from})${statuses.includes('error') ? ' - some data could not be loaded' : ''}`;
+  }
+  if (statuses.includes('loading')) return 'Loading...';
+  if (statuses.includes('offline')) return 'Offline';
+  if (statuses.includes('error')) return 'Unavailable - data service not reachable';
+  if (statuses.includes('zoom-in')) return 'Zoom in to load';
+  if (statuses.every((s) => s === 'ready')) return 'None in this area';
+  return '';
+}
+
+function renderHazards() {
+  if (!hazardSources.length) return; // map events before boot() finished
+  map.setHazards(hazardSources.flatMap((s) => s.state.hazards));
   const view = map.getView();
-  for (const id of hazardKinds) { // unsupported kinds keep "No data source connected"
-    if (!layers.isOn(id) && next.status !== 'ready') continue;
-    let text;
-    switch (next.status) {
-      case 'zoom-in': text = 'Zoom in to load'; break;
-      case 'loading': text = 'Loading...'; break;
-      case 'offline': text = 'Offline'; break;
-      case 'error': text = next.hazards.length
-        ? 'Could not load this area - showing earlier results only'
-        : 'Unavailable - data service not reachable'; break;
-      case 'ready': {
-        const n = next.hazards.filter((h) => h.kind === id && bboxContains(view.bbox, { south: h.lat, north: h.lat, west: h.lng, east: h.lng })).length;
-        text = n ? `${n} in view (OpenStreetMap)` : 'None mapped in this area';
-        break;
-      }
-      default: text = '';
-    }
-    layers.setStatus(id, text);
+  for (const id of new Set(hazardSources.flatMap((s) => s.provider.kinds))) { // unsupported kinds keep "No data source connected"
+    if (!layers.isOn(id) && !sourcesOf(id).every((s) => s.state.status === 'ready')) continue;
+    layers.setStatus(id, hazardStatusText(id, view));
   }
 }
 
 function onViewChanged(view) {
-  if (hazardLayersOn()) hazardLoader.request(view);
-  else if (hazardState.status === 'ready') onHazardState(hazardState);
+  let requested = false;
+  for (const s of hazardSources) {
+    if (hazardLayersOn(s)) { s.loader.request(view); requested = true; }
+  }
+  if (!requested) renderHazards(); // keep the "in view" counts current
 }
 
 function onLayerToggle(id, visible) {
   map.setLayerVisible(id, visible);
-  if (HAZARD_IDS.includes(id) && visible) hazardLoader.requestNow(map.getView());
+  if (HAZARD_IDS.includes(id) && visible) for (const s of sourcesOf(id)) s.loader.requestNow(map.getView());
 }
 
 // ----------------------------------------------------------------- boot
@@ -396,16 +407,27 @@ function boot() {
     onViewChanged,
   });
 
-  const provider = createHazardProvider();
-  hazardKinds = provider.kinds;
+  hazardSources = [
+    [createOverpassProvider(cfg.hazards), cfg.hazards],
+    [createBackendProvider(cfg.reports), cfg.reports],
+    [createRoadFeatureProvider(cfg.roadFeatures), cfg.roadFeatures],
+  ].map(([provider, sourceCfg]) => {
+    const source = { provider, state: { status: 'idle', hazards: [] } };
+    source.loader = createHazardLoader({
+      provider,
+      cfg: sourceCfg,
+      onState: (next) => { source.state = next; renderHazards(); },
+      isOnline: () => navigator.onLine,
+    });
+    return source;
+  });
   layers = new LayersPanel({
     root: $('nv-layers'),
     button: $('nv-layers-btn'),
-    supported: ['traffic', ...provider.kinds],
+    supported: ['traffic', ...new Set(hazardSources.flatMap((s) => s.provider.kinds))],
     onToggle: onLayerToggle,
   });
   for (const id of HAZARD_IDS) map.setLayerVisible(id, layers.isOn(id));
-  hazardLoader = createHazardLoader({ provider, onState: onHazardState, isOnline: () => navigator.onLine });
 
   panel = new RoutePanel({
     root: $('nv-sheet'),
@@ -446,7 +468,7 @@ function boot() {
   window.addEventListener('offline', () => status.setOffline(true));
   window.addEventListener('online', () => {
     status.setOffline(false);
-    if (hazardLayersOn()) hazardLoader.retry(map.getView());
+    for (const s of hazardSources) if (hazardLayersOn(s)) s.loader.retry(map.getView());
   });
 
   store.subscribe(scheduleTrafficRender);
@@ -455,12 +477,12 @@ function boot() {
   setInterval(renderTraffic, 5000); // keeps "updated N s ago" and staleness current
 
   // Release the connection when the page is hidden for good / restored from cache.
-  window.addEventListener('pagehide', () => { disconnectTrafficFeed(store); hazardLoader.cancel(); });
+  window.addEventListener('pagehide', () => { disconnectTrafficFeed(store); for (const s of hazardSources) s.loader.cancel(); });
   window.addEventListener('pageshow', (e) => { if (e.persisted) connectTrafficFeed(store); });
 
   prompt();
   renderTraffic();
-  if (hazardLayersOn()) hazardLoader.request(map.getView());
+  onViewChanged(map.getView());
 
   window.smartTrafficNav = Object.freeze({
     diagnostics: () => ({
@@ -474,7 +496,7 @@ function boot() {
         liveDelaySeconds: Math.round(state.estimates.get(id).delay),
       })),
       liveState: state.liveState,
-      hazardStatus: hazardState.status,
+      hazardStatus: Object.fromEntries(hazardSources.map((s) => [s.provider.name, s.state.status])),
     }),
   });
 }
