@@ -1,0 +1,304 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "New Sulemani Gas Station",
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "district": "Sulaymaniyah District",
+    "neighbourhood": "سابونکەران ٢٠٤",
+    "suburb": "ئیبراهیم ئەحمەد",
+    "street": "Baban Street",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.433805,
+    "lat": 35.5432721,
+    "formatted": "New Sulemani Gas Station, ئیبراهیم ئەحمەد, Baban Street, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "New Sulemani Gas Station",
+    "address_line2": "ئیبراهیم ئەحمەد, Baban Street, Sulaymaniyah, 46001, Iraq",
+    "categories": [
+     "service",
+     "service.vehicle",
+     "service.vehicle.fuel"
+    ],
+    "details": [
+     "details"
+    ],
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright",
+     "raw": {
+      "lat": 35.5432721,
+      "lon": 45.433805,
+      "osm_id": 6992168685,
+      "amenity": "fuel",
+      "name:en": "New Sulemani Gas Station",
+      "osm_type": "n"
+     }
+    },
+    "name_international": {
+     "en": "New Sulemani Gas Station"
+    },
+    "distance": 2046,
+    "place_id": "51afeb17ec86b7464059252aaff089c54140f00103f901ed06c4a001000000"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.433805,
+     35.5432721
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "HP staion",
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "city_district": "شارەوانی ٤٠٧",
+    "district": "Sulaymaniyah District",
+    "suburb": "شارەوانی",
+    "street": "407-12",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.4271094,
+    "lat": 35.542992,
+    "formatted": "HP staion, شارەوانی, 407-12, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "HP staion",
+    "address_line2": "شارەوانی, 407-12, Sulaymaniyah, 46001, Iraq",
+    "categories": [
+     "service",
+     "service.vehicle",
+     "service.vehicle.fuel"
+    ],
+    "details": [
+     "details",
+     "details.fuel_options"
+    ],
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright",
+     "raw": {
+      "lat": 35.543108832992814,
+      "lon": 45.427018703935325,
+      "name": "HP staion",
+      "brand": "halabja group",
+      "osm_id": 900011289,
+      "amenity": "fuel",
+      "osm_type": "w",
+      "fuel:diesel": "yes",
+      "fuel:petrol": "yes"
+     }
+    },
+    "brand": "halabja group",
+    "fuel_options": {
+     "diesel": true,
+     "petrol": true
+    },
+    "distance": 2131,
+    "place_id": "515d17848ca8b6464059baef199784c54140f00102f9011915a53500000000920309485020737461696f6e"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.427018703935325,
+     35.543108832992814
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "بەنزینخانەی هەوار",
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "district": "Sulaymaniyah District",
+    "suburb": "هەواری تازە",
+    "street": "30 Meter Road",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.4454282,
+    "lat": 35.5784421,
+    "formatted": "Hawar Gas Station, هەواری تازە, 30 Meter Road, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "Hawar Gas Station",
+    "address_line2": "هەواری تازە, 30 Meter Road, Sulaymaniyah, 46001, Iraq",
+    "categories": [
+     "service",
+     "service.vehicle",
+     "service.vehicle.fuel"
+    ],
+    "details": [
+     "details"
+    ],
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright",
+     "raw": {
+      "lat": 35.5784421,
+      "lon": 45.4454282,
+      "name": "بەنزینخانەی هەوار",
+      "osm_id": 4406104691,
+      "amenity": "fuel",
+      "name:ar": "محطة ھوار",
+      "name:en": "Hawar Gas Station",
+      "name:ku": "بەنزینخانەی هەوار",
+      "osm_type": "n"
+     }
+    },
+    "name_international": {
+     "ar": "محطة ھوار",
+     "en": "Hawar Gas Station",
+     "ku": "بەنزینخانەی هەوار"
+    },
+    "distance": 2177,
+    "place_id": "51abdb8fca03b9464059951007640aca4140f00103f90173d29f0601000000920321d8a8db95d986d8b2db8cd986d8aed8a7d986db95db8c20d987db95d988d8a7d8b1"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.4454282,
+     35.5784421
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "وێستگەی سوتەمەنی هەڵوێست",
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "city_district": "شارەوانی ٤٠٧",
+    "district": "Sulaymaniyah District",
+    "suburb": "شارەوانی",
+    "street": "407-15",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.4247299,
+    "lat": 35.5425331,
+    "formatted": "halwyst gas station, شارەوانی, 407-15, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "halwyst gas station",
+    "address_line2": "شارەوانی, 407-15, Sulaymaniyah, 46001, Iraq",
+    "categories": [
+     "service",
+     "service.vehicle",
+     "service.vehicle.fuel"
+    ],
+    "details": [
+     "details"
+    ],
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright",
+     "raw": {
+      "lat": 35.5425331,
+      "lon": 45.4247299,
+      "city": "سلێمانی",
+      "name": "وێستگەی سوتەمەنی هەڵوێست",
+      "state": "کوردستان",
+      "osm_id": 4729302590,
+      "amenity": "fuel",
+      "name:en": "halwyst gas station",
+      "district": "شارۆچکەی ناوەندیی سلێمانی",
+      "name:ckb": "وێستگەی سوتەمەنی هەڵوێست",
+      "osm_type": "n",
+      "province": "پارێزگای سلێمانی"
+     }
+    },
+    "name_international": {
+     "en": "halwyst gas station"
+    },
+    "distance": 2252,
+    "place_id": "511211a38c5db6464059aebf80b971c54140f00103f9013e6ee3190100000092032ed988db8ed8b3d8aadaafdb95db8c20d8b3d988d8aadb95d985db95d986db8c20d987db95dab5d988db8ed8b3d8aa"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.4247299,
+     35.5425331
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "بەنزینخانەی باش و چاک",
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "district": "Sulaymaniyah District",
+    "suburb": "ڕزگاری",
+    "street": "شەقامی تۆفیق وەهبی بەگ",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.4089695,
+    "lat": 35.5541078,
+    "formatted": "بەنزینخانەی باش و چاک, ڕزگاری, شەقامی تۆفیق وەهبی بەگ, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "بەنزینخانەی باش و چاک",
+    "address_line2": "ڕزگاری, شەقامی تۆفیق وەهبی بەگ, Sulaymaniyah, 46001, Iraq",
+    "categories": [
+     "service",
+     "service.vehicle",
+     "service.vehicle.fuel"
+    ],
+    "details": [
+     "details"
+    ],
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright",
+     "raw": {
+      "lat": 35.5541078,
+      "lon": 45.4089695,
+      "name": "بەنزینخانەی باش و چاک",
+      "osm_id": 6536784085,
+      "amenity": "fuel",
+      "operator": "بەنزیخانەی باش و چاک",
+      "osm_type": "n"
+     }
+    },
+    "operator": "بەنزیخانەی باش و چاک",
+    "distance": 2327,
+    "place_id": "51dec7d11c59b4464059b0ba1f01edc64140f00103f901d5689f8501000000920327d8a8db95d986d8b2db8cd986d8aed8a7d986db95db8c20d8a8d8a7d8b420d98820da86d8a7daa9"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.4089695,
+     35.5541078
+    ]
+   }
+  }
+ ]
+}

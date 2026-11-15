@@ -43,8 +43,7 @@ The console prints the URLs:
   Mobile API  http://localhost:5500/api/v1/config
 ```
 
-followed by `[navigation]` warnings for development defaults (public OSM
-providers, no admin token…). Try the mobile API:
+followed by `[navigation]` warnings for what is not set up (Geoapify key, admin token…). Try the mobile API:
 
 ```bash
 curl -s localhost:5500/api/v1/config
@@ -59,7 +58,8 @@ Recommended local settings for working on the navigation API:
 
 ```
 DEVICE_TOKEN_SECRET=<64 hex characters>   # tokens survive restarts
-NAV_ADMIN_TOKEN=<random>                  # enables road-feature management and moderation
+NAV_ADMIN_TOKEN=<48 hex characters>        # admin console + road-feature management + moderation (16+ chars)
+GEOAPIFY_API_KEY=…                        # place search + routing (server only); the map (OpenFreeMap) needs no key
 INTERSECTION_LAT=… INTERSECTION_LNG=…     # surveyed position: live traffic on routes
 ```
 
@@ -81,13 +81,13 @@ MONGODB_TEST_URI=mongodb://127.0.0.1:27017 npm test # + real-MongoDB tests
 
 | Suite | Covers |
 |---|---|
-| `test/navigationUnits.test.js` | Geometry, device tokens (tampering, `alg: none`, expiry), rate limiter, cache, throttle, circuit breaker, provider error mapping, validation, OSRM / Nominatim / Overpass parsing, live traffic view and route delay |
-| `test/navigationApi.test.js` | The whole `/api/v1` over HTTP with the real router, services and decision engine; providers are a local fake server reached over real HTTP; errors, auth, rate limits, disabled features, cache behaviour; Swagger covers every route |
+| `test/navigationUnits.test.js` | Geometry, device tokens (tampering, `alg: none`, expiry), rate limiter, cache, throttle, circuit breaker, provider error mapping, validation, Geoapify answer parsing and error mapping, live traffic view and route delay |
+| `test/navigationApi.test.js` | The whole `/api/v1` over HTTP with the real router, services and decision engine; Geoapify and OSRM are local fake servers (answering with real captured Geoapify bodies) reached over real HTTP; errors, auth, rate limits, disabled features, cache behaviour; Swagger covers every route |
 | `test/navigationDatabase.test.js` | Against a **real** MongoDB (`MONGODB_TEST_URI`, skipped otherwise): 2dsphere / TTL indexes, area queries incl. geodesic edges, merge, votes (incl. a concurrency race), dismissals, withdraw, expiry, moderation, retention, route alerts. Creates and drops its own database. |
 | the other `*.test.js` files | Decision engine, ingestion, history, streams, simulation, network, Socket.IO, Swagger, web navigation logic, "no fake data" guard |
 
 `scripts/smokeNavigation.js` complements them: it calls a running backend,
-so the real OSRM, Nominatim and Overpass are exercised.
+so the real Geoapify is exercised with your key (it uses about ten credits).
 
 ## Project layout
 
@@ -113,3 +113,10 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#code-organization).
 `.gitignore`, which only stops new files from being added. To stop tracking
 it (deployments run `npm ci` anyway): `git rm -r --cached node_modules`, then
 commit.
+
+## More
+
+- [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md): run it from a clean machine (OpenFreeMap, Geoapify, database, secrets, tests)
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md), [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+- [docs/API_TEST_REPORT.md](docs/API_TEST_REPORT.md): every endpoint and what was tested
+- Swagger UI: `/api/docs/`

@@ -1,4 +1,4 @@
-// Navigation: four routes ranked best to worst from OSRM times plus live AI
+// Navigation: four routes ranked best to worst from provider times plus live AI
 // traffic (frontend/navigation/routeRanking.js, routeService.findMoreRoutes).
 // No browser, map or network: routes are built from coordinates here.
 const test = require('node:test');
@@ -74,7 +74,7 @@ test('heavier traffic at the intersection pushes the routes through it down the 
     return orderRoutes(routes, est, previous, { hysteresisSeconds: 5 });
   };
   const quiet = rank([view({})]);
-  assert.deepEqual(quiet, ['a', 'b', 'c'], 'no traffic: OSRM times decide');
+  assert.deepEqual(quiet, ['a', 'b', 'c'], 'no traffic: provider times decide');
   // The north approach fills up (the southbound route enters there).
   const busyNorth = rank([view({ north: { vehicles: 9, queueLength: 7, waitingTime: 30 } })], quiet); // 600 + 30 + 18 s
   assert.deepEqual(busyNorth, ['b', 'c', 'a']);
@@ -102,60 +102,3 @@ test('labels and colours run from best (green) to slowest (red)', async () => {
   assert.deepEqual([0, 1].map((i) => rankColor(i, 2)), [RANK_COLORS[0], RANK_COLORS[3]], 'worst is always red');
 });
 
-test('an extra route must use different roads and must not double back', async () => {
-  const { isUsefulAlternative, hasBacktrack, overlapRatio } = await load('routeRanking.js');
-  const main = route('a', 600, [[0, -1000], [0, 1000]]);
-  const sameRoad = route('x', 610, [[3, -1000], [3, 1000]]);
-  const parallel = route('y', 650, [[0, -1000], [400, -600], [400, 600], [0, 1000]]);
-  const spur = route('z', 700, [[0, -1000], [0, 0], [600, 0], [0, 0], [0, 1000]]);
-  assert.ok(overlapRatio(sameRoad.coordinates, main.coordinates) > 0.95);
-  assert.equal(isUsefulAlternative(sameRoad, [main]), false, 'same road shifted a little is not a new route');
-  assert.equal(isUsefulAlternative(parallel, [main]), true);
-  assert.equal(hasBacktrack(spur.coordinates), true);
-  assert.equal(isUsefulAlternative(spur, [main]), false, 'out-and-back to a via point is not a route');
-  assert.equal(isUsefulAlternative({ ...parallel, duration: 600 * 3 }, [main]), false, 'absurd detour');
-});
-
-test('findMoreRoutes adds real OSRM via routes until there are four, spaced for the rate limit', async () => {
-  const { findMoreRoutes } = await load('routeService.js');
-  const { NAV_CONFIG } = await load('config.js');
-  const start = { lat: IX.lat, lng: IX.lng };
-  const destination = { lat: IX.lat + 2000 * M_LAT, lng: IX.lng };
-  const existing = [{ ...route('osrm-0', 600, [[0, 0], [0, 2000]]), index: 0, source: 'osrm', summary: '' }];
-  const requests = [];
-  const original = global.fetch;
-  // Each via request answers with a road-following route through that via point;
-  // the second via point returns the same road as an earlier one (rejected).
-  global.fetch = async (url) => {
-    requests.push({ url, at: Date.now() });
-    if (url.includes('/nearest/')) {
-      // Two roads near the point: the nearest is tried first.
-      const [lng, lat] = url.split('/driving/')[1].split('?')[0].split(',').map(Number);
-      return { ok: true, status: 200, json: async () => ({ code: 'Ok', waypoints: [
-        { name: '101-9', location: [lng, lat], distance: 3 },
-        { name: 'Salim Street', location: [lng, lat], distance: 20 },
-      ] }) };
-    }
-    const via = url.split('/driving/')[1].split('?')[0].split(';')[1].split(',').map(Number);
-    const side = Math.sign(via[1] - IX.lng);
-    const k = requests.filter((r) => !r.url.includes('/nearest/')).length;
-    const x = k === 2 ? 400 * side + 2 : [0, 400, 400, 900, 900, 1400][k - 1] * side;
-    const coords = [[0, 0], [x, 300], [x, 1700], [0, 2000]].map(([mx, my]) => [IX.lng + mx * M_LNG, IX.lat + my * M_LAT]);
-    return { ok: true, status: 200, json: async () => ({ code: 'Ok', routes: [{ distance: 2600 + k, duration: 650 + k * 10, legs: [], geometry: { type: 'LineString', coordinates: coords } }] }) };
-  };
-  try {
-    const cfg = { ...NAV_CONFIG.routing, minIntervalMs: 20 };
-    const added = [];
-    const found = await findMoreRoutes(start, destination, existing, { cfg, onRoute: (r) => added.push(r.id) });
-    assert.equal(existing.length + found.length, 4, 'four routes in total');
-    assert.deepEqual(found.map((r) => r.id), added);
-    const routeRequests = requests.filter((r) => !r.url.includes('/nearest/'));
-    assert.ok(routeRequests.every((r) => /;/.test(r.url.split('/driving/')[1]) && /alternatives=false/.test(r.url)), 'via-point requests only');
-    assert.ok(requests.filter((r) => r.url.includes('/nearest/')).length >= 1, 'via points are snapped to named roads first');
-    assert.ok(routeRequests.length <= cfg.maxViaRequests);
-    for (let i = 1; i < requests.length; i += 1) assert.ok(requests[i].at - requests[i - 1].at >= 15, 'requests are spaced');
-    assert.ok(found.every((r) => r.coordinates.length >= 2), 'road geometry from the provider, never a straight line');
-  } finally {
-    global.fetch = original;
-  }
-});

@@ -27,8 +27,14 @@ function createTrafficRoutes(controller, { mode = 'live' } = {}) {
 }
 
 /** /api/simulation: read-only simulated state (same handlers, simulation engine) + start/pause/reset/scenario/tour. */
-function createSimulationRoutes(readController, simulationController) {
+function createSimulationRoutes(readController, simulationController, { locked = false } = {}) {
   const router = createTrafficRoutes(readController, { mode: 'simulation' });
+  // Production: the simulation can be watched but not driven by anyone who can reach the server.
+  if (locked) {
+    router.use((req, res, next) => (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)
+      ? res.status(403).json({ ok: false, code: 'SIMULATION_LOCKED', error: 'Simulation controls are disabled in production' })
+      : next()));
+  }
   router.get('/status', simulationController.status);
   router.post('/start', simulationController.start);
   router.post('/pause', simulationController.pause);

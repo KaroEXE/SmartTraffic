@@ -28,7 +28,7 @@ function toAccount(doc) {
   };
 }
 
-function createUserAccountService({ User = defaultUser, isConnected = isDatabaseConnected }) {
+function createUserAccountService({ User = defaultUser, isConnected = isDatabaseConnected, afterDelete = async () => {} }) {
   const requireDb = () => { if (!isConnected()) throw dbUnavailable(); };
   const emailTaken = () => new ApiError(409, 'EMAIL_TAKEN', 'An account with this email already exists: sign in instead');
   // 403, not 401: the session is fine, only the password given is wrong.
@@ -102,10 +102,31 @@ function createUserAccountService({ User = defaultUser, isConnected = isDatabase
     if (!user || versionOf(user) !== tokenVersion) throw signedOut();
     if (!await verifyPassword(password, user.passwordHash)) throw wrongPassword();
     await User.deleteOne({ _id: id });
+    await afterDelete(id); // the account's saved places go with it
+  }
+
+  /** Operator listing, newest first, optionally by the start of the email. Never includes password data. */
+  async function list({ q = null, page = 1, limit = 25 } = {}) {
+    requireDb();
+    const filter = q ? { email: { $regex: `^${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` } } : {};
+    const [docs, total] = await Promise.all([
+      User.find(filter).select('email name createdAt').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      User.countDocuments(filter),
+    ]);
+    return {
+      users: docs.map((d) => toAccount(d).user), total, page, limit,
+    };
+  }
+
+  /** Operator statistics: all accounts, and those created since `since`. */
+  async function stats(since) {
+    requireDb();
+    const [total, recent] = await Promise.all([User.countDocuments({}), User.countDocuments({ createdAt: { $gte: since } })]);
+    return { total, last7Days: recent };
   }
 
   return {
-    signup, login, current, logout, updateProfile, changePassword, deleteAccount,
+    signup, login, current, logout, updateProfile, changePassword, deleteAccount, list, stats,
   };
 }
 

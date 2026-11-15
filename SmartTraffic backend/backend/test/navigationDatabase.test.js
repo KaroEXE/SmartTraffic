@@ -12,8 +12,10 @@ const mongoose = require('mongoose');
 
 const RoadFeature = require('../models/RoadFeature');
 const RoadReport = require('../models/RoadReport');
+const LocalPlace = require('../models/LocalPlace');
+const SavedPlace = require('../models/SavedPlace');
 const {
-  ADMIN_TOKEN, START, DESTINATION, IX, latLng, startFakeProviders, startApi,
+  ADMIN_TOKEN, TEST_KEY, START, DESTINATION, IX, latLng, startFakeProviders, startApi,
 } = require('./helpers/navigationHarness');
 
 const uri = (process.env.MONGODB_TEST_URI || '').trim();
@@ -34,7 +36,7 @@ if (!uri) {
 
   test.before(async () => {
     await mongoose.connect(uri, { dbName: `smarttraffic_navtest_${process.pid}_${Date.now()}`, serverSelectionTimeoutMS: 5000 });
-    for (const Model of [RoadFeature, RoadReport]) {
+    for (const Model of [RoadFeature, RoadReport, LocalPlace, SavedPlace]) {
       await Model.createCollection();
       await Model.createIndexes();
     }
@@ -97,8 +99,8 @@ if (!uri) {
     assert.equal((await api.del('/api/v1/road-features/0123456789abcdef01234567', { token: ADMIN_TOKEN })).status, 404);
     assert.equal((await create({ kind: 'speed_camera', lat: 1 })).status, 400);
 
-    const merged = await api.get(`/api/v1/road-features?${box(p)}`);
-    assert.deepEqual(merged.body.sources, { operator: 'ok', osm: 'ok' }, 'operator and OpenStreetMap together');
+    const all = await api.get(`/api/v1/road-features?${box(p)}`);
+    assert.deepEqual(all.body.sources, { operator: 'ok' }, 'operator-entered features only: nothing is fetched from elsewhere');
   });
 
   test('reports: create, duplicate, merge into a nearby report, one vote per device, never on your own', async () => {
@@ -249,5 +251,137 @@ if (!uri) {
     assert.ok(Math.abs(accident.alongMeters - 800) < 10, `along ${accident.alongMeters}`);
     assert.ok(bypass.roadAlerts.some((a) => a.id === closure.id && a.message === 'Road closed: East Lane'));
     assert.equal(bypass.roadAlerts.some((a) => a.id === onRoute.id), false, 'not on the bypass');
+  });
+
+  test('admin console: overview counts, users (no password data), reports and features in any status, paging, filters', async () => {
+    const admin = { token: ADMIN_TOKEN };
+    for (const email of ['zed.admin.a@example.invalid', 'zed.admin.b@example.invalid', 'other.person@example.invalid']) {
+      assert.equal((await api.post('/api/v1/auth/signup', { email, password: 'Correct-Horse-9' })).status, 201);
+    }
+    const p = spot(20);
+    const report = await api.post('/api/v1/reports', { type: 'traffic_jam', ...p }, { token: devices.a });
+    assert.equal(report.status, 201);
+    const feature = await api.post('/api/v1/road-features', { kind: 'speed_bump', ...spot(21), active: false }, admin);
+    assert.equal(feature.status, 201);
+
+    const overview = await api.get('/api/v1/admin/overview', admin);
+    assert.equal(overview.status, 200, JSON.stringify(overview.body));
+    assert.equal(overview.body.users.available, true);
+    assert.ok(overview.body.users.total >= 3 && overview.body.users.last7Days >= 3);
+    assert.ok(overview.body.reports.byStatus.active >= 1);
+    assert.ok(overview.body.reports.activeByType.traffic_jam >= 1);
+    assert.ok(overview.body.roadFeatures.total >= 1 && overview.body.roadFeatures.byKind.speed_bump >= 1);
+    assert.ok(overview.body.roadFeatures.active < overview.body.roadFeatures.total, 'the inactive feature is counted but not active');
+    assert.equal(overview.body.system.geoapify.enabled, true);
+    assert.equal(JSON.stringify(overview.body).includes(TEST_KEY), false, 'no key in the overview');
+
+    const users = await api.get('/api/v1/admin/users?q=ZED.admin', admin);
+    assert.equal(users.status, 200);
+    assert.equal(users.body.total, 2, 'prefix search, case-insensitive');
+    assert.deepEqual(Object.keys(users.body.users[0]).sort(), ['createdAt', 'email', 'id', 'name']);
+    assert.equal(JSON.stringify(users.body).includes('passwordHash'), false);
+    const paged = await api.get('/api/v1/admin/users?q=zed.admin&limit=1&page=2', admin);
+    assert.equal(paged.body.users.length, 1);
+    assert.equal(paged.body.total, 2);
+    assert.equal((await api.get('/api/v1/admin/users?q=.*', admin)).status, 400, 'a pattern is not an email prefix');
+    assert.equal((await api.get('/api/v1/admin/users?q=%7B%22%24ne%22%3A1%7D', admin)).status, 400, 'no operators');
+    assert.equal((await api.get('/api/v1/admin/users?limit=1000', admin)).status, 400);
+
+    const reports = await api.get('/api/v1/admin/reports?status=active&type=traffic_jam', admin);
+    assert.ok(reports.body.reports.some((r) => r.id === report.body.report.id));
+    assert.equal(JSON.stringify(reports.body).includes('reporterId'), false);
+    assert.equal((await api.get('/api/v1/admin/reports?status=nonsense', admin)).status, 400);
+    await api.patch(`/api/v1/reports/${report.body.report.id}`, { status: 'removed' }, admin);
+    const removed = await api.get('/api/v1/admin/reports?status=removed', admin);
+    assert.ok(removed.body.reports.some((r) => r.id === report.body.report.id), 'the console sees removed reports the public list hides');
+
+    const inactive = await api.get('/api/v1/admin/road-features?active=false&kind=speed_bump', admin);
+    assert.ok(inactive.body.features.some((f) => f.id === feature.body.feature.id), 'inactive features are listed for the operator');
+    const activeOnly = await api.get('/api/v1/admin/road-features?active=true', admin);
+    assert.equal(activeOnly.body.features.some((f) => f.id === feature.body.feature.id), false);
+    assert.equal((await api.get('/api/v1/admin/road-features?active=maybe', admin)).status, 400);
+  });
+
+  test('local places: admin CRUD, public map layer, searched before the provider, names per language, hidden when inactive', async () => {
+    const admin = { token: ADMIN_TOKEN };
+    const p = spot(30);
+    const body = { name: 'Hawr Test Clinic', nameAr: 'عيادة هاور', nameKu: 'کلینیکی هاور', category: 'hospital', ...p, description: 'Entered by the operator' };
+    assert.equal((await api.post('/api/v1/places/local', body)).status, 401, 'admin only');
+    assert.equal((await api.post('/api/v1/places/local', body, { token: devices.a })).status, 401);
+    assert.equal((await api.post('/api/v1/places/local', { ...body, category: 'volcano' }, admin)).status, 400);
+    assert.equal((await api.post('/api/v1/places/local', { ...body, lat: 999 }, admin)).status, 400);
+    assert.equal((await api.post('/api/v1/places/local', { ...body, $where: 'x' }, admin)).status, 400);
+    const created = await api.post('/api/v1/places/local', body, admin);
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const id = created.body.place.id;
+
+    const layer = await api.get(`/api/v1/places/local?${box(p)}`);
+    assert.equal(layer.status, 200);
+    assert.deepEqual(layer.body.places.map((x) => [x.id, x.name, x.category]), [[id, 'Hawr Test Clinic', 'hospital']]);
+    assert.equal((await api.get(`/api/v1/places/local?${box(p)}&categories=fuel`)).body.count, 0, 'category filter');
+    assert.equal((await api.get('/api/v1/places/local?south=1&west=1&north=9&east=9')).status, 400, 'an area wider than the limit');
+    assert.equal((await api.get(`/api/v1/places/local/${id}`)).body.place.nameKu, 'کلینیکی هاور');
+
+    const found = await api.get('/api/v1/places/search?q=Test%20Clinic&lang=ku&limit=5');
+    assert.equal(found.status, 200);
+    assert.equal(found.body.places[0].id, `hawr:${id}`, 'the operator own place comes first');
+    assert.equal(found.body.places[0].source, 'hawr');
+    assert.equal(found.body.places[0].name, 'کلینیکی هاور', 'the Kurdish name when Kurdish is asked for');
+    assert.equal((await api.get(`/api/v1/places/search?q=${encodeURIComponent('هاور')}&lang=ar`)).body.places[0].name, 'عيادة هاور', 'found by its Arabic name too');
+    assert.equal((await api.get('/api/v1/places/search?q=%5B.*%5D')).body.places.some((x) => x.source === 'hawr'), false, 'a regex in the query is text, not a pattern');
+
+    const listed = await api.get('/api/v1/admin/places?category=hospital&active=true', admin);
+    assert.ok(listed.body.places.some((x) => x.id === id));
+    const patched = await api.patch(`/api/v1/places/local/${id}`, { active: false }, admin);
+    assert.equal(patched.status, 200);
+    assert.equal((await api.get(`/api/v1/places/local?${box(p)}`)).body.count, 0, 'a hidden place is not on the map');
+    assert.equal((await api.get('/api/v1/places/search?q=Test%20Clinic')).body.places.some((x) => x.source === 'hawr'), false, 'nor in search');
+    assert.ok((await api.get('/api/v1/admin/places?active=false', admin)).body.places.some((x) => x.id === id), 'but the console still lists it');
+    assert.equal((await api.patch(`/api/v1/places/local/${id}`, {}, admin)).status, 400, 'nothing to change');
+    assert.equal((await api.get('/api/v1/admin/overview', admin)).body.localPlaces.total >= 1, true);
+    assert.equal((await api.del(`/api/v1/places/local/${id}`, admin)).status, 200);
+    assert.equal((await api.get(`/api/v1/places/local/${id}`)).status, 404);
+  });
+
+  test('saved places: only for a signed-in user, private to that user, capped, removed with the account', async () => {
+    const signup = async (email) => (await api.post('/api/v1/auth/signup', { email, password: 'Correct-Horse-9' })).body.token;
+    const sara = await signup('saved.sara@example.invalid');
+    const omar = await signup('saved.omar@example.invalid');
+    const here = { lat: 36.19, lng: 44.01 };
+
+    assert.equal((await api.get('/api/v1/saved-places')).status, 401);
+    assert.equal((await api.get('/api/v1/saved-places', { token: devices.a })).status, 401, 'a device token is not a user token');
+    assert.equal((await api.post('/api/v1/saved-places', { label: 'x', lat: 999, lng: 1 }, { token: sara })).status, 400);
+    assert.equal((await api.post('/api/v1/saved-places', { label: '', ...here }, { token: sara })).status, 400);
+    assert.equal((await api.post('/api/v1/saved-places', { label: 'Home', kind: 'castle', ...here }, { token: sara })).status, 400);
+    assert.equal((await api.post('/api/v1/saved-places', { label: 'Home', userId: 'someone-else', ...here }, { token: sara })).status, 400, 'the owner is never taken from the body');
+
+    const home = await api.post('/api/v1/saved-places', { label: 'Home', kind: 'home', address: 'Erbil', ...here }, { token: sara });
+    assert.equal(home.status, 201, JSON.stringify(home.body));
+    assert.equal(JSON.stringify(home.body).includes('userId'), false, 'the owner is not returned');
+    const id = home.body.savedPlace.id;
+    assert.deepEqual((await api.get('/api/v1/saved-places', { token: sara })).body.savedPlaces.map((x) => x.label), ['Home']);
+    assert.deepEqual((await api.get('/api/v1/saved-places', { token: omar })).body.savedPlaces, [], 'another user does not see it');
+    assert.equal((await api.patch(`/api/v1/saved-places/${id}`, { label: 'Mine now' }, { token: omar })).status, 404, 'nor change it');
+    assert.equal((await api.del(`/api/v1/saved-places/${id}`, { token: omar })).status, 404, 'nor delete it');
+    const renamed = await api.patch(`/api/v1/saved-places/${id}`, { label: 'Home sweet home' }, { token: sara });
+    assert.equal(renamed.body.savedPlace.label, 'Home sweet home');
+    assert.equal((await api.patch(`/api/v1/saved-places/${id}`, {}, { token: sara })).status, 400);
+
+    // the cap
+    for (let i = 1; i < 100; i += 1) assert.equal((await api.post('/api/v1/saved-places', { label: `Place ${i}`, ...here }, { token: sara })).status, 201);
+    const over = await api.post('/api/v1/saved-places', { label: 'One too many', ...here }, { token: sara });
+    assert.equal(over.status, 409);
+    assert.equal(over.body.code, 'SAVED_PLACE_LIMIT');
+
+    // a logout revokes the token: the places are no longer readable with it
+    const login = await api.post('/api/v1/auth/login', { email: 'saved.sara@example.invalid', password: 'Correct-Horse-9' });
+    await api.post('/api/v1/auth/logout', undefined, { token: login.body.token });
+    assert.equal((await api.get('/api/v1/saved-places', { token: login.body.token })).status, 401);
+
+    // deleting the account deletes its saved places
+    const again = await api.post('/api/v1/auth/login', { email: 'saved.sara@example.invalid', password: 'Correct-Horse-9' });
+    assert.equal((await api.del('/api/v1/auth/me', { token: again.body.token, body: { password: 'Correct-Horse-9' } })).status, 200);
+    assert.equal(await SavedPlace.countDocuments({}), 0, 'no saved place of the deleted account is left');
   });
 }

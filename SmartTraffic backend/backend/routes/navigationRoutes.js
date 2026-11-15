@@ -15,7 +15,7 @@ const { handle, sendError } = require('../utils/apiError');
  *   public   no token
  *   device   "Authorization: Bearer <device token>" from POST /auth/device
  *   user     "Authorization: Bearer <user token>" from POST /auth/signup or /auth/login
- *   admin    "Authorization: Bearer <NAV_ADMIN_TOKEN>" - operator tools only,
+ *   admin    "Authorization: Bearer <NAV_ADMIN_TOKEN>" - operator tools (admin console) only,
  *            never in the app; disabled (503) when NAV_ADMIN_TOKEN is not set
  *
  * Rate limits (config.navigation.rateLimits): every route per IP, plus a
@@ -23,7 +23,7 @@ const { handle, sendError } = require('../utils/apiError');
  * per-device limits on writes.
  */
 function createNavigationRoutes({
-  navigationController: nav, roadDataController: road, authController: auth, deviceTokens, userTokens, adminToken, rateLimits, now = Date.now,
+  navigationController: nav, roadDataController: road, authController: auth, adminController: operator, placeDataController: placeData, deviceTokens, userTokens, adminToken, rateLimits, now = Date.now,
 }) {
   const router = express.Router();
   const minute = 60_000;
@@ -80,6 +80,15 @@ function createNavigationRoutes({
   router.get('/places/search', search, handle(nav.searchPlaces));
   router.get('/places/reverse', search, handle(nav.reversePlace));
   router.get('/places/nearby', places, handle(nav.nearbyPlaces));
+  router.get('/places/local', handle(placeData.listLocal));
+  router.get('/places/local/:id', handle(placeData.getLocal));
+  router.post('/places/local', admin, handle(placeData.createLocal));
+  router.patch('/places/local/:id', admin, handle(placeData.updateLocal));
+  router.delete('/places/local/:id', admin, handle(placeData.deleteLocal));
+  router.get('/saved-places', user, handle(placeData.listSaved));
+  router.post('/saved-places', user, handle(placeData.createSaved));
+  router.patch('/saved-places/:id', user, handle(placeData.updateSaved));
+  router.delete('/saved-places/:id', user, handle(placeData.deleteSaved));
 
   router.post('/routes', routes, handle(nav.planRoutes));
   router.get('/traffic', handle(nav.traffic));
@@ -96,6 +105,12 @@ function createNavigationRoutes({
   router.post('/reports/:id/votes', device, votes, handle(road.voteReport));
   router.delete('/reports/:id', device, handle(road.withdrawReport));
   router.patch('/reports/:id', admin, handle(road.moderateReport));
+
+  router.get('/admin/overview', admin, handle(operator.overview));
+  router.get('/admin/users', admin, handle(operator.listUsers));
+  router.get('/admin/reports', admin, handle(operator.listReports));
+  router.get('/admin/road-features', admin, handle(operator.listFeatures));
+  router.get('/admin/places', admin, handle(operator.listPlaces));
 
   router.use((req, res) => sendError(res, 404, 'NOT_FOUND', `No route ${req.method} ${req.originalUrl}`));
   return router;

@@ -7,7 +7,7 @@
  */
 const { isValidLatLng } = require('./geo');
 const {
-  FEATURE_KINDS, REPORT_TYPES, REPORT_VOTES, MODERATION_STATUSES, PLATFORMS, PLACE_CATEGORIES, LIMITS,
+  FEATURE_KINDS, REPORT_TYPES, REPORT_VOTES, MODERATION_STATUSES, PLATFORMS, PLACE_CATEGORIES, LOCAL_PLACE_CATEGORIES, SAVED_PLACE_KINDS, LIMITS,
 } = require('../models/navigationConstants');
 
 const OBJECT_ID = /^[a-f0-9]{24}$/i;
@@ -340,6 +340,60 @@ function validateFeatureInput(body, { partial = false } = {}) {
   return result(errors, out);
 }
 
+/** POST / PATCH /api/v1/places/local body (admin). */
+function validateLocalPlaceInput(body, { partial = false } = {}) {
+  if (!isPlainObject(body)) return { errors: ['body must be a JSON object'] };
+  const errors = [];
+  unknownKeys(errors, body, ['name', 'nameAr', 'nameKu', 'category', 'lat', 'lng', 'description', 'active']);
+  const out = {};
+  if (body.name !== undefined || !partial) {
+    if (typeof body.name !== 'string' || !body.name.trim() || body.name.trim().length > LIMITS.nameLength) errors.push(`name is required, at most ${LIMITS.nameLength} characters`);
+    else out.name = body.name.trim();
+  }
+  optionalText(errors, body, 'nameAr', LIMITS.nameLength, out);
+  optionalText(errors, body, 'nameKu', LIMITS.nameLength, out);
+  optionalText(errors, body, 'description', LIMITS.descriptionLength, out);
+  if (body.category !== undefined || !partial) {
+    if (!LOCAL_PLACE_CATEGORIES.includes(body.category)) errors.push(`category must be one of ${LOCAL_PLACE_CATEGORIES.join(', ')}`);
+    else out.category = body.category;
+  }
+  if (body.lat !== undefined || body.lng !== undefined || !partial) {
+    const before = errors.length;
+    checkLatLng(errors, '', body.lat, body.lng);
+    if (errors.length === before) out.location = { type: 'Point', coordinates: [body.lng, body.lat] };
+  }
+  if (body.active !== undefined) {
+    if (typeof body.active !== 'boolean') errors.push('active must be true or false');
+    else out.active = body.active;
+  }
+  if (partial && !errors.length && !Object.keys(out).length) errors.push('nothing to change');
+  return result(errors, out);
+}
+
+/** POST / PATCH /api/v1/saved-places body (signed-in user). */
+function validateSavedPlaceInput(body, { partial = false } = {}) {
+  if (!isPlainObject(body)) return { errors: ['body must be a JSON object'] };
+  const errors = [];
+  unknownKeys(errors, body, ['label', 'kind', 'address', 'lat', 'lng']);
+  const out = {};
+  if (body.label !== undefined || !partial) {
+    if (typeof body.label !== 'string' || !body.label.trim() || body.label.trim().length > LIMITS.savedLabelLength) errors.push(`label is required, at most ${LIMITS.savedLabelLength} characters`);
+    else out.label = body.label.trim();
+  }
+  if (body.kind !== undefined) {
+    if (!SAVED_PLACE_KINDS.includes(body.kind)) errors.push(`kind must be one of ${SAVED_PLACE_KINDS.join(', ')}`);
+    else out.kind = body.kind;
+  }
+  optionalText(errors, body, 'address', LIMITS.addressLength, out);
+  if (body.lat !== undefined || body.lng !== undefined || !partial) {
+    const before = errors.length;
+    checkLatLng(errors, '', body.lat, body.lng);
+    if (errors.length === before) out.location = { type: 'Point', coordinates: [body.lng, body.lat] };
+  }
+  if (partial && !errors.length && !Object.keys(out).length) errors.push('nothing to change');
+  return result(errors, out);
+}
+
 /** GET /api/v1/places/nearby query */
 function validateNearbyQuery(query) {
   const errors = [];
@@ -391,5 +445,7 @@ module.exports = {
   validateModeration,
   validateFeatureInput,
   validateNearbyQuery,
+  validateLocalPlaceInput,
+  validateSavedPlaceInput,
   validateSearchQuery,
 };

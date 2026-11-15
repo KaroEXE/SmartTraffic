@@ -20,88 +20,6 @@ test('distance to a route line', async () => {
 
 // --------------------------------------------------------------- routing
 
-const osrmRoute = (duration, coords) => ({
-  distance: 2000, duration, legs: [{ summary: 'Main Road' }],
-  geometry: { type: 'LineString', coordinates: coords },
-});
-
-test('OSRM request uses lng,lat order and asks for up to three alternatives (four routes)', async () => {
-  const { buildOsrmUrl } = await load('routeService.js');
-  const url = buildOsrmUrl({ lat: 35.1, lng: 45.2 }, { lat: 35.3, lng: 45.4 });
-  assert.match(url, /\/route\/v1\/driving\/45\.2,35\.1;45\.4,35\.3\?/);
-  assert.match(url, /alternatives=3/);
-  assert.match(url, /geometries=geojson/);
-});
-
-test('OSRM routes are normalised to [lat, lng] lines; errors become RouteErrors', async () => {
-  const { normalizeOsrmResponse, RouteError } = await load('routeService.js');
-  const { routes, snapWarnings } = normalizeOsrmResponse({
-    code: 'Ok',
-    routes: [osrmRoute(300, [[45.2, 35.1], [45.3, 35.2]]), osrmRoute(360, [[45.2, 35.1], [45.25, 35.15], [45.3, 35.2]])],
-    waypoints: [{ distance: 12 }, { distance: 640 }],
-  });
-  assert.equal(routes.length, 2);
-  assert.deepEqual(routes[0].coordinates[0], [35.1, 45.2]);
-  assert.equal(routes[0].summary, 'Main Road');
-  assert.equal(routes[0].traffic, null, 'OSRM routes never carry a traffic adjustment');
-  assert.equal(snapWarnings.length, 1);
-  assert.match(snapWarnings[0], /Destination is 640 m from the nearest road/);
-
-  assert.throws(() => normalizeOsrmResponse({ code: 'NoRoute', routes: [] }), (e) => e instanceof RouteError && e.code === 'no-route');
-  assert.throws(() => normalizeOsrmResponse({ code: 'InvalidValue' }), (e) => e.code === 'provider');
-  assert.throws(() => normalizeOsrmResponse({ code: 'Ok', routes: [{ distance: 1, duration: 1, geometry: { type: 'Point', coordinates: [1, 2] } }] }),
-    (e) => e.code === 'no-route', 'a route without a line is not accepted');
-});
-
-test('only a complete live-AI adjustment counts as traffic-adjusted', async () => {
-  const { validTrafficAdjustment } = await load('routeService.js');
-  const ok = validTrafficAdjustment({ adjustedDuration: 420, basis: 'live-ai', updatedAt: '2026-10-09T10:00:00Z', alerts: [{ message: ' Queue at Main ' }, {}] }, 300);
-  assert.deepEqual(ok, { adjustedDuration: 420, delay: 120, basis: 'live-ai', updatedAt: '2026-10-09T10:00:00Z', alerts: [{ message: 'Queue at Main' }] });
-  assert.equal(validTrafficAdjustment({ adjustedDuration: 420, basis: 'historical', updatedAt: '2026-10-09T10:00:00Z' }, 300), null);
-  assert.equal(validTrafficAdjustment({ adjustedDuration: NaN, basis: 'live-ai', updatedAt: '2026-10-09T10:00:00Z' }, 300), null);
-  assert.equal(validTrafficAdjustment({ adjustedDuration: 420, basis: 'live-ai' }, 300), null, 'needs a timestamp');
-  assert.equal(validTrafficAdjustment(null, 300), null);
-});
-
-test('backend routes keep a valid adjustment and drop an invalid one', async () => {
-  const { normalizeBackendResponse } = await load('routeService.js');
-  const routes = normalizeBackendResponse({ routes: [
-    { ...osrmRoute(300, [[45.2, 35.1], [45.3, 35.2]]), traffic: { adjustedDuration: 360, basis: 'live-ai', updatedAt: '2026-10-09T10:00:00Z' } },
-    { ...osrmRoute(320, [[45.2, 35.1], [45.3, 35.2]]), traffic: { adjustedDuration: 'soon' } },
-  ] });
-  assert.equal(routes[0].traffic.adjustedDuration, 360);
-  assert.equal(routes[1].traffic, null);
-  assert.equal(normalizeBackendResponse({ nope: true }), null);
-});
-
-test('fastest route uses live-adjusted times only when every route has one', async () => {
-  const { rankRoutes } = await load('routeService.js');
-  const r = (id, duration, adjusted) => ({ id, duration, traffic: adjusted === undefined ? null : { adjustedDuration: adjusted } });
-  assert.deepEqual(rankRoutes([r('a', 300), r('b', 280)]), { fastestId: 'b', basis: 'base' });
-  assert.deepEqual(rankRoutes([r('a', 300, 310), r('b', 280, 500)]), { fastestId: 'a', basis: 'live-ai' });
-  assert.deepEqual(rankRoutes([r('a', 300, 310), r('b', 280)]), { fastestId: 'b', basis: 'base' }, 'mixed: no live claim');
-});
-
-test('planRoutes validates input and never falls back to a straight line', async () => {
-  const { planRoutes, RouteError } = await load('routeService.js');
-  await assert.rejects(planRoutes({ lat: 95, lng: 0 }, { lat: 1, lng: 1 }), (e) => e instanceof RouteError && e.code === 'invalid-input');
-  await assert.rejects(planRoutes({ lat: 1, lng: 1 }, { lat: 1, lng: 1 }), (e) => e.code === 'invalid-input');
-
-  const realFetch = global.fetch;
-  try {
-    global.fetch = async () => ({ ok: false, status: 503, json: async () => { throw new Error('html'); } });
-    await assert.rejects(planRoutes({ lat: 35.1, lng: 45.2 }, { lat: 35.3, lng: 45.4 }), (e) => e.code === 'provider');
-    global.fetch = async () => { throw new TypeError('fetch failed'); };
-    await assert.rejects(planRoutes({ lat: 35.1, lng: 45.2 }, { lat: 35.3, lng: 45.4 }), (e) => e.code === 'network');
-    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ code: 'Ok', routes: [osrmRoute(300, [[45.2, 35.1], [45.25, 35.2], [45.4, 35.3]])], waypoints: [] }) });
-    const result = await planRoutes({ lat: 35.1, lng: 45.2 }, { lat: 35.3, lng: 45.4 });
-    assert.equal(result.trafficRouting, 'not-configured');
-    assert.equal(result.routes[0].coordinates.length, 3, 'road geometry from the provider');
-  } finally {
-    global.fetch = realFetch;
-  }
-});
-
 // --------------------------------------------------------------- traffic
 
 const snapshot = (over = {}) => ({
@@ -204,29 +122,6 @@ test('reroute suggestions only from real data', async () => {
 
 // --------------------------------------------------------------- hazards
 
-test('Overpass data becomes hazards; nothing is invented', async () => {
-  const { parseOverpass, buildOverpassQuery } = await load('hazardService.js');
-  const hazards = parseOverpass({ elements: [
-    { type: 'node', id: 1, lat: 35.56, lon: 45.43, tags: { highway: 'speed_camera', maxspeed: '60' } },
-    { type: 'way', id: 2, center: { lat: 35.57, lon: 45.44 }, tags: { traffic_calming: 'hump' } },
-    { type: 'node', id: 3, lat: 35.58, lon: 45.45, tags: { traffic_calming: 'chicane' } },
-    { type: 'node', id: 4, tags: { highway: 'speed_camera' } },
-  ] });
-  assert.deepEqual(hazards.map((h) => [h.id, h.kind, h.label]), [['osm-node-1', 'speed_camera', 'Speed camera'], ['osm-way-2', 'speed_bump', 'Speed hump']]);
-  assert.equal(hazards[0].details.maxspeed, '60');
-  assert.equal(hazards[0].verification, 'community');
-  assert.equal(hazards[0].url, 'https://www.openstreetmap.org/node/1');
-  assert.deepEqual(parseOverpass({ elements: [] }), [], 'empty area stays empty');
-  assert.match(buildOverpassQuery({ south: 1, west: 2, north: 3, east: 4 }), /node\["highway"="speed_camera"\]\(1,2,3,4\)/);
-});
-
-test('speed bumps tagged traffic_calming=yes are included', async () => {
-  const { parseOverpass, buildOverpassQuery } = await load('hazardService.js');
-  const [h] = parseOverpass({ elements: [{ type: 'node', id: 5, lat: 35.5, lon: 45.4, tags: { traffic_calming: 'yes' } }] });
-  assert.equal(h.kind, 'speed_bump');
-  assert.match(buildOverpassQuery({ south: 1, west: 2, north: 3, east: 4 }), /\|yes\|/);
-});
-
 test('approved reports: own loader, any zoom, reloaded once stale', async () => {
   const { createHazardLoader } = await load('hazardService.js');
   let calls = 0;
@@ -263,46 +158,6 @@ test('a slow load is not restarted when the map moves inside its area', async ()
   assert.equal(states.at(-1).status, 'ready');
 });
 
-test('important places: hospitals first, known categories only', async () => {
-  const { parsePlaces, buildPlacesQuery } = await load('placesService.js');
-  const places = parsePlaces({ elements: [
-    { type: 'way', id: 1, center: { lat: 35.56, lon: 45.43 }, tags: { amenity: 'hospital', name: 'نەخۆشخانەی فێرکاری', 'name:en': 'Teaching Hospital' } },
-    { type: 'node', id: 2, lat: 35.57, lon: 45.44, tags: { amenity: 'fuel' } },
-    { type: 'node', id: 3, lat: 35.58, lon: 45.45, tags: { amenity: 'bench' } },
-    { type: 'way', id: 1, center: { lat: 35.56, lon: 45.43 }, tags: { amenity: 'hospital' } },
-  ] }, 'en');
-  assert.deepEqual(places.map((p) => [p.id, p.kind, p.category, p.name]), [
-    ['osm-way-1', 'health', 'hospital', 'Teaching Hospital'],
-    ['osm-node-2', 'places', 'fuel', null],
-  ]);
-  assert.equal(places[0].altName, 'نەخۆشخانەی فێرکاری');
-  const q = buildPlacesQuery({ south: 1, west: 2, north: 3, east: 4 }, 50);
-  assert.match(q, /nwr\["amenity"="hospital"\]\(1,2,3,4\)/);
-  assert.match(q, /\.h out center tags;/, 'hospitals are not subject to the result limit');
-});
-
-test('area picker covers the whole Kurdistan Region by default', async () => {
-  const { NAV_CONFIG } = await load('config.js');
-  const { regions, defaultRegion } = NAV_CONFIG.map;
-  const all = regions.find((r) => r.id === defaultRegion);
-  const [[south, west], [north, east]] = all.bounds;
-  for (const r of regions.filter((x) => !x.bounds)) {
-    assert.ok(r.lat > south && r.lat < north && r.lng > west && r.lng < east, `${r.name} lies inside the region view`);
-  }
-  assert.equal(new Set(regions.map((r) => r.id)).size, regions.length, 'unique ids');
-});
-
-test('backend hazards are validated; unknown verification counts as unverified', async () => {
-  const { parseBackendHazards } = await load('hazardService.js');
-  const out = parseBackendHazards({ hazards: [
-    { id: 'a', kind: 'road_closure', lat: 35.5, lng: 45.4, verification: 'verified', source: 'City traffic dept' },
-    { id: 'b', kind: 'speed_camera', lat: 35.5, lng: 45.4, verification: 'trust-me' },
-    { id: 'c', kind: 'pothole', lat: 35.5, lng: 45.4 },
-    { id: 'd', kind: 'speed_bump', lat: 135, lng: 45.4 },
-  ] });
-  assert.deepEqual(out.map((h) => [h.id, h.verification]), [['backend-a', 'verified'], ['backend-b', 'unverified']]);
-});
-
 test('hazard loader: zoom limit, area cache, kept results after an error', async () => {
   const { createHazardLoader } = await load('hazardService.js');
   const states = [];
@@ -337,19 +192,6 @@ test('hazard loader: zoom limit, area cache, kept results after an error', async
 
 // ------------------------------------------------------------- geocoding
 
-test('geocoder parsing and local search area', async () => {
-  const { parseNominatim, localSearchBox } = await load('geocoder.js');
-  const places = parseNominatim([
-    { osm_type: 'way', osm_id: 7, lat: '35.53', lon: '45.45', name: 'University of Sulaimani', display_name: 'University of Sulaimani, Sulaymaniyah' },
-    { osm_type: 'node', osm_id: 8, lat: 'x', lon: '45' },
-  ]);
-  assert.deepEqual(places, [{ id: 'way-7', name: 'University of Sulaimani', address: 'University of Sulaimani, Sulaymaniyah', lat: 35.53, lng: 45.45 }]);
-
-  const box = localSearchBox({ south: 35.56, west: 45.43, north: 35.57, east: 45.44 }, 0.3);
-  assert.ok(Math.abs(box.north - box.south - 0.3) < 1e-9, 'small views are widened');
-  assert.ok(Math.abs((box.north + box.south) / 2 - 35.565) < 1e-9, 'centred on the view');
-});
-
 test('formatting', async () => {
   const { formatDuration, formatDistance, formatDelay, formatAge } = await load('format.js');
   assert.equal(formatDuration(25), '< 1 min');
@@ -376,4 +218,250 @@ test('operator road features become verified hazards; unknown kinds and bad posi
   ]);
   assert.equal(out[0].details.maxspeed, '60');
   assert.equal(out[1].source, 'SmartTraffic operator');
+});
+
+// ------------------------------------------ the provider, through the backend
+
+const flush = async () => {};
+const withFetch = async (impl, fn) => {
+  const real = globalThis.fetch;
+  globalThis.fetch = impl;
+  try { return await fn(); } finally { globalThis.fetch = real; }
+};
+const jsonResponse = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+const backendRoute = (duration, coords, extra = {}) => ({
+  id: 'rt_x', distance: 2000, duration, summary: 'Main Road', geometry: { type: 'LineString', coordinates: coords }, ...extra,
+});
+
+test('routes from the backend become [lat, lng] lines; unusable routes are dropped; no traffic is invented', async () => {
+  const { normalizeBackendResponse, rankRoutes } = await load('routeService.js');
+  const out = normalizeBackendResponse({
+    routes: [
+      backendRoute(600, [[45.4, 35.5], [45.5, 35.6]], { traffic: { adjustedDuration: 1, basis: 'live-ai', updatedAt: new Date().toISOString() } }),
+      backendRoute(700, [[45.4, 35.5]]), // one point: not a line
+      { ...backendRoute(800, [[45.4, 35.5], [45.5, 35.6]]), distance: 'far' },
+      backendRoute(900, [[45.4, 35.5], [45.45, 35.55], [45.5, 35.6]]),
+    ],
+    snapWarnings: ['Start is 450 m from the nearest road.', 42],
+  });
+  assert.equal(out.routes.length, 2);
+  assert.deepEqual(out.routes[0].coordinates, [[35.5, 45.4], [35.6, 45.5]], 'GeoJSON [lng, lat] becomes [lat, lng]');
+  assert.equal(out.routes[0].traffic, null, 'live delay is added in the browser, once');
+  assert.equal(out.routes[0].summary, 'Main Road');
+  assert.deepEqual(out.snapWarnings, ['Start is 450 m from the nearest road.']);
+  assert.equal(normalizeBackendResponse({ routes: [] }), null);
+  assert.equal(normalizeBackendResponse(null), null);
+  assert.equal(normalizeBackendResponse({ routes: [1, 2, 3, 4, 5].map((n) => backendRoute(n * 100, [[45, 35], [45.1, 35.1]])) }, { maxRoutes: 3 }).routes.length, 3);
+  assert.deepEqual(rankRoutes(out.routes), { fastestId: out.routes[0].id, basis: 'base' });
+  assert.deepEqual(rankRoutes([]), { fastestId: null, basis: 'base' });
+});
+
+test('planRoutes asks the backend only, validates input, and maps backend errors for the driver', async () => {
+  const { planRoutes, RouteError } = await load('routeService.js');
+  const start = { lat: 35.5, lng: 45.4 };
+  const destination = { lat: 35.6, lng: 45.5 };
+  const calls = [];
+  const answer = (status, body) => async (url, init) => { calls.push({ url: String(url), init }); return jsonResponse(status, body); };
+
+  const ok = await withFetch(answer(200, { ok: true, routes: [backendRoute(600, [[45.4, 35.5], [45.5, 35.6]])], snapWarnings: [] }), () => planRoutes(start, destination));
+  assert.equal(ok.routes.length, 1);
+  assert.equal(calls[0].url, '/api/v1/routes', 'same-origin backend, never a map provider');
+  assert.equal(calls[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(calls[0].init.body), { start, destination, maxRoutes: 4 });
+
+  const failures = [
+    [422, 'NO_ROUTE', 'no-route'], [422, 'POINT_NOT_ROUTABLE', 'no-route'], [429, 'RATE_LIMITED', 'busy'],
+    [503, 'PROVIDER_QUOTA_EXCEEDED', 'busy'], [503, 'PROVIDER_BUSY', 'busy'], [503, 'FEATURE_DISABLED', 'provider'], [504, 'PROVIDER_TIMEOUT', 'timeout'],
+  ];
+  for (const [status, code, expected] of failures) {
+    await assert.rejects(
+      withFetch(answer(status, { ok: false, code, error: 'x' }), () => planRoutes(start, destination)),
+      (e) => e instanceof RouteError && e.code === expected && !/geoapify|127\.0\.0\.1/i.test(e.message),
+      code,
+    );
+  }
+  await assert.rejects(withFetch(answer(500, null), () => planRoutes(start, destination)), (e) => e.code === 'provider');
+  await assert.rejects(withFetch(async () => { throw new Error('down'); }, () => planRoutes(start, destination)), (e) => e.code === 'network');
+
+  const before = calls.length;
+  await assert.rejects(planRoutes({ lat: 99, lng: 0 }, destination), (e) => e.code === 'invalid-input');
+  await assert.rejects(planRoutes(start, start), (e) => e.code === 'invalid-input');
+  await assert.rejects(withFetch(answer(200, { ok: true, routes: [] }), () => planRoutes(start, destination)), (e) => e.code === 'no-route', 'an empty answer is no route, never a straight line');
+  assert.equal(calls.length, before + 1, 'invalid input never reaches the backend');
+  await flush();
+});
+
+test('place search goes through the backend; entries without a real position are dropped', async () => {
+  const { parsePlaces, createGeocoder, GeocodeError } = await load('geocoder.js');
+  const places = parsePlaces({ places: [
+    { id: 'geoapify:1', name: ' Hospital ', address: 'Main St', lat: 35.5, lng: 45.4 },
+    { id: 'geoapify:2', name: 'No position', lat: null, lng: null },
+    { id: 'geoapify:3', name: 'Text position', lat: '35.5', lng: '45.4' },
+    { id: 'geoapify:4', name: '', lat: 35.5, lng: 45.4 },
+    { name: 'No id', lat: 0.5, lng: 0.5 },
+  ] });
+  assert.deepEqual(places.map((p) => p.name), ['Hospital', 'No id']);
+  assert.equal(places[0].address, 'Main St');
+  assert.deepEqual(parsePlaces({ places: 'x' }), []);
+
+  const calls = [];
+  const geocoder = createGeocoder();
+  const search = (body, status = 200) => withFetch(async (url) => { calls.push(String(url)); return jsonResponse(status, body); },
+    () => geocoder.search('hospital', { viewbox: { south: 35, west: 45, north: 36, east: 46 } }));
+  const result = await search({ ok: true, scope: 'local', places: [{ id: 'a', name: 'A', lat: 35.5, lng: 45.5 }] });
+  assert.equal(result.scope, 'local');
+  const url = new URL(calls[0], 'http://x');
+  assert.equal(url.pathname, '/api/v1/places/search');
+  assert.equal(url.searchParams.get('q'), 'hospital');
+  assert.equal(url.searchParams.get('lat'), '35.5', 'ranked towards the middle of the map view');
+  assert.equal(url.searchParams.get('lng'), '45.5');
+  assert.equal(url.searchParams.get('limit'), '5');
+  await assert.rejects(search({ ok: false, code: 'RATE_LIMITED' }, 429), (e) => e instanceof GeocodeError && e.code === 'busy');
+  await assert.rejects(search({ ok: false, code: 'FEATURE_DISABLED' }, 503), (e) => e.code === 'provider');
+  await assert.rejects(geocoder.search('ab'), (e) => e.code === 'too-short');
+  assert.equal(calls.length, 3, 'a too-short query is not sent');
+});
+
+test('the road feature request asks only for the operator kinds in view', async () => {
+  const { createRoadFeatureProvider } = await load('hazardService.js');
+  let requested = null;
+  const provider = createRoadFeatureProvider({ url: '/api/v1/road-features' });
+  await withFetch(async (url) => { requested = String(url); return jsonResponse(200, { features: [] }); }, () => provider.fetchHazards({ south: 1, west: 2, north: 3, east: 4 }));
+  const query = new URL(requested, 'http://x').searchParams;
+  assert.equal(query.get('kinds'), 'speed_camera,speed_bump,road_closure');
+  assert.equal(query.has('sources'), false);
+  assert.equal(requested.startsWith('/api/v1/road-features?'), true);
+});
+
+test('map config: read from the backend, validated, a failed request means no map (never a guess)', async () => {
+  const cfg = await import(pathToFileURL(path.join(__dirname, '..', '..', 'frontend', 'mapConfig.js')).href);
+  const map = {
+    styleUrl: 'https://tiles.openfreemap.org/styles/liberty', bounds: { south: 34.4, west: 42.3, north: 37.4, east: 46.4 }, minZoom: 6, maxZoom: 19, attribution: { text: 'x', url: 'https://openfreemap.org' },
+  };
+  assert.deepEqual((await withFetch(async () => jsonResponse(200, { map, searchAttribution: { text: 'Powered by Geoapify' } }), () => cfg.loadMapConfig())).map, map);
+  assert.equal(await withFetch(async () => jsonResponse(200, { map: { ...map, styleUrl: 5 } }), () => cfg.loadMapConfig()), null, 'a style that is not a URL is no config');
+  assert.equal(await withFetch(async () => jsonResponse(200, { map: { ...map, bounds: { south: 'a' } } }), () => cfg.loadMapConfig()), null);
+  assert.equal(await withFetch(async () => jsonResponse(500, {}), () => cfg.loadMapConfig()), null);
+  assert.equal(await withFetch(async () => { throw new Error('down'); }, () => cfg.loadMapConfig()), null, 'a failed request is no config, not a crash');
+
+  assert.deepEqual(cfg.toMapBounds(map.bounds), [[42.3, 34.4], [46.4, 37.4]], 'MapLibre wants [[west, south], [east, north]]');
+  assert.deepEqual(cfg.latLngsToLngLats([[35.5, 45.4], [36, 44]]), [[45.4, 35.5], [44, 36]], 'routes are [lat, lng], MapLibre wants [lng, lat]');
+  const centre = cfg.boundsCenter(map.bounds);
+  assert.ok(Math.abs(centre.lat - 35.9) < 1e-9 && Math.abs(centre.lng - 44.35) < 1e-9);
+  assert.equal(cfg.insideBounds(map.bounds, { lat: 36, lng: 44 }), true);
+  assert.equal(cfg.insideBounds(map.bounds, { lat: 33.3, lng: 44.4 }), false, 'Baghdad is outside the Kurdistan Region lock');
+  const circle = cfg.circlePolygon({ lat: 36, lng: 44 }, 100, 8);
+  assert.equal(circle.coordinates[0].length, 9, 'a closed ring');
+  assert.deepEqual(circle.coordinates[0][0], circle.coordinates[0][8]);
+  const radius = Math.hypot((circle.coordinates[0][0][0] - 44) * 111320 * Math.cos((36 * Math.PI) / 180), (circle.coordinates[0][0][1] - 36) * 110540);
+  assert.ok(Math.abs(radius - 100) < 1, 'the circle has the requested radius in metres');
+});
+
+test('driver reports and Hawr places become map points; reports that are not active and bad positions are dropped', async () => {
+  const { parseReports, parsePlaces } = await load('hazardService.js');
+  const reports = parseReports({ reports: [
+    { id: 'a1', type: 'accident', label: 'Accident', lat: 36.1, lng: 44.0, status: 'active', verification: 'unverified', description: 'Two cars', confirmations: 2, dismissals: 1, createdAt: '2026-11-12T10:00:00.000Z', expiresAt: '2026-11-12T12:00:00.000Z' },
+    { id: 'a2', type: 'accident', lat: 36.1, lng: 44.0, status: 'expired' },
+    { id: 'a3', type: 'hazard', lat: 999, lng: 44.0, status: 'active' },
+    { id: 7, type: 'hazard', lat: 36, lng: 44, status: 'active' },
+  ] });
+  assert.equal(reports.length, 1);
+  assert.deepEqual([reports[0].id, reports[0].kind, reports[0].icon, reports[0].verification], ['report-a1', 'report', 'accident', 'unverified']);
+  assert.equal(reports[0].details.votes, '2 confirmed, 1 disputed');
+  const places = parsePlaces({ places: [{ id: 'p1', name: 'City Hospital', lat: 35.5, lng: 45.4, description: 'Main' }, { id: 'p2', name: 'Nowhere', lat: null, lng: 1 }, { name: 'No id', lat: 1, lng: 1 }] });
+  assert.deepEqual(places.map((p) => [p.id, p.kind, p.label, p.source]), [['place-p1', 'place', 'City Hospital', 'Hawr']]);
+  assert.deepEqual(parseReports(null), []);
+  assert.deepEqual(parsePlaces({}), []);
+});
+
+test('the device session registers once, reuses its token, signs in again on a 401 and explains failures', async () => {
+  const { createDeviceSession, ReportError } = await load('deviceSession.js');
+  const store = new Map();
+  globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, v), removeItem: (k) => store.delete(k) };
+  try {
+    const now = () => Date.parse('2026-11-12T10:00:00Z');
+    const calls = [];
+    let rejectNext = false;
+    let issued = 0;
+    const fetchFn = async (url, init) => {
+      calls.push(`${init.method} ${url}`);
+      if (url === '/api/v1/auth/device') { issued += 1; return jsonResponse(201, { token: `t${issued}`, expiresAt: '2026-12-12T10:00:00Z' }); }
+      if (rejectNext) { rejectNext = false; return jsonResponse(401, { ok: false, code: 'INVALID_TOKEN', error: 'bad' }); }
+      return jsonResponse(201, { ok: true, report: { id: 'r' } });
+    };
+    const session = createDeviceSession('k', { fetchFn, now });
+    await session.postReport({ type: 'accident', lat: 36, lng: 44, description: '  ' });
+    await session.postReport({ type: 'hazard', lat: 36, lng: 44 });
+    assert.equal(issued, 1, 'one registration serves both reports');
+    assert.equal(JSON.parse(store.get('k')).token, 't1', 'and is kept for the next page load');
+    rejectNext = true;
+    await session.postReport({ type: 'hazard', lat: 36, lng: 44 });
+    assert.equal(issued, 2, 'a rejected token is replaced, the report is sent again once');
+    assert.equal(calls.filter((c) => c === 'POST /api/v1/reports').length, 4);
+
+    const failing = (status, body) => createDeviceSession('k2', { fetchFn: async (url) => (url === '/api/v1/auth/device' ? jsonResponse(201, { token: 't', expiresAt: '2026-12-12T10:00:00Z' }) : jsonResponse(status, body)), now });
+    await assert.rejects(failing(429, {}).postReport({ type: 'hazard', lat: 1, lng: 1 }), (e) => e instanceof ReportError && e.code === 'RATE_LIMITED');
+    await assert.rejects(failing(503, {}).postReport({ type: 'hazard', lat: 1, lng: 1 }), (e) => e.code === 'UNAVAILABLE');
+    await assert.rejects(failing(400, { code: 'INVALID_REQUEST', error: 'type must be one of ...' }).postReport({ type: 'x', lat: 1, lng: 1 }), (e) => e.message.startsWith('type must be'));
+    const down = createDeviceSession('k3', { fetchFn: async () => { throw new Error('offline'); }, now });
+    await assert.rejects(down.postReport({ type: 'hazard', lat: 1, lng: 1 }), (e) => e.code === 'NETWORK');
+  } finally {
+    delete globalThis.localStorage;
+  }
+});
+
+test('nothing in the web app or the backend still depends on the old public map services', () => {
+  const fs = require('fs');
+  const root = path.join(__dirname, '..', '..');
+  const files = [];
+  (function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (['node_modules', 'test', 'docs', 'data'].includes(entry.name) || entry.name.startsWith('.')) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(js|html|css)$/.test(entry.name)) files.push(full);
+    }
+  }(path.join(root, 'frontend')));
+  (function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (['node_modules', 'test', 'docs', 'data', 'scripts'].includes(entry.name) || entry.name.startsWith('.')) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.js$/.test(entry.name) && !/\.test\.js$/.test(entry.name)) files.push(full);
+    }
+  }(path.join(root, 'backend')));
+  assert.ok(files.length > 50, 'the scan found the sources');
+  const old = /project-osrm|nominatim\.openstreetmap|overpass-api|overpass\.private|overpass\.kumi|tile\.openstreetmap|router\.project/i;
+  const hits = files.filter((f) => old.test(fs.readFileSync(f, 'utf8'))).map((f) => path.relative(root, f));
+  assert.deepEqual(hits, [], 'old map service URLs found');
+});
+
+test('a map area wider than the backend allows is cut down around its centre', async () => {
+  const { clampBBox, padBBox } = await load('geo.js');
+  const wide = padBBox({ south: 35.0, west: 44.0, north: 35.3, east: 44.66 }, 0.25); // a big screen: 0.99 degrees wide after padding
+  const area = clampBBox(wide, 0.45);
+  assert.ok(Math.abs(area.east - area.west - 0.45) < 1e-9);
+  assert.ok(Math.abs(area.north - area.south - 0.45) < 1e-9 || area.north - area.south < 0.45);
+  assert.ok(Math.abs((area.east + area.west) / 2 - (wide.east + wide.west) / 2) < 1e-9, 'same centre');
+  const small = { south: 1, west: 2, north: 1.1, east: 2.1 };
+  assert.deepEqual(clampBBox(small, 0.45), small, 'a small area is left alone');
+});
+
+test('no trace of the removed map provider or of Leaflet is left in the sources, the docs or the env example', () => {
+  const fs = require('fs');
+  const root = path.join(__dirname, '..', '..');
+  const skip = new Set(['node_modules', 'graphify-out', '.git', 'data', 'package-lock.json']);
+  const files = [];
+  (function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (skip.has(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(js|mjs|html|css|md|json|example|webmanifest)$/.test(entry.name) && !/\.test\.js$/.test(entry.name)) files.push(full);
+    }
+  }(root));
+  assert.ok(files.length > 80, 'the scan found the sources');
+  const removed = new RegExp(['tare' + 'ky', 'leaf' + 'let'].join('|'), 'i');
+  const hits = files.filter((f) => removed.test(fs.readFileSync(f, 'utf8'))).map((f) => path.relative(root, f));
+  assert.deepEqual(hits, [], 'files that still mention the removed provider or Leaflet');
 });

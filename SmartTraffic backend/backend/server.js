@@ -20,11 +20,18 @@ const { createStreamController } = require('./controllers/streamController');
 const { createTrafficRoutes, createSimulationRoutes, createStreamRoutes } = require('./routes/trafficRoutes');
 const { createDocsRoutes } = require('./routes/docsRoutes');
 const { createNavigationApi, navigationWarnings } = require('./services/navigation');
-const { createHazardReportService } = require('./services/hazardReportService');
-const { createHazardController } = require('./controllers/hazardController');
-const { createHazardRoutes } = require('./routes/hazardRoutes');
-const { createOsmProxyService } = require('./services/osmProxyService');
-const { createOsmRoutes } = require('./routes/osmRoutes');
+const { ATTRIBUTION, MAP_ATTRIBUTION } = require('./controllers/navigationController');
+const { corsOrigin } = require('./utils/cors');
+const { productionProblems } = require('./config/production');
+
+if (config.production) {
+  const problems = productionProblems(config);
+  if (problems.length) {
+    console.error('[server] Not starting in production:');
+    for (const problem of problems) console.error(`  - ${problem}`);
+    process.exit(1);
+  }
+}
 const { initTrafficSocket } = require('./socket/trafficSocket');
 
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
@@ -73,7 +80,6 @@ const simulationHistory = config.mongodbUri
   }).start()
   : null;
 if (simulationHistory) simulation.on('reset', () => simulationHistory.resetTracking());
-connectDatabase(config.mongodbUri);
 
 // Camera stream registry (MongoDB). Live channel only. Reloaded every 30 s
 // while the database is connected, so the dashboard's camera status and
@@ -90,13 +96,6 @@ setTimeout(refreshStreams, 2_000).unref();
 // LIVE engine only; road features and reports are stored in MongoDB.
 const navigation = createNavigationApi({ config, engine: service });
 
-// WEB NAVIGATION MAP (frontend/navigation.html): driver road reports, shown
-// on the map only after approval on admin.html, and OpenStreetMap layers
-// fetched by the backend (Overpass refuses anonymous browser clients).
-const hazardReports = createHazardReportService({ file: config.hazardReportsFile });
-if (!config.adminToken) console.warn('[hazard-reports] ADMIN_TOKEN is not set - driver reports are collected but cannot be reviewed or published');
-const osmProxy = createOsmProxyService({ urls: config.navigation.overpass.urls, userAgent: config.navigation.userAgent });
-
 const controller = createTrafficController(service, {
   history,
   databaseHealth: () => ({
@@ -107,7 +106,7 @@ const controller = createTrafficController(service, {
   ingestToken: config.trafficIngestToken,
   streamRegistry: streams,
   network,
-  navigationHealth: navigation.health,
+  navigationHealth: navigation.publicHealth,
 });
 const simulationReadController = createTrafficController(simulation.engine, {
   stateService: simulation.stateService, network: simulation.coordinator,
@@ -119,12 +118,27 @@ if (!config.trafficIngestToken) {
 app.disable('x-powered-by');
 // Behind a reverse proxy (Render, Nginx) req.ip is the client only with this set.
 app.set('trust proxy', config.trustProxy);
-app.use(cors({ origin: config.corsOrigin }));
+const allowedOrigin = corsOrigin(config.cors);
+app.use(cors({ origin: allowedOrigin }));
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'SAMEORIGIN');
+  res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
 app.use(express.json({ limit: '100kb' }));
 
-// Settings the browser needs. Only public values - never secrets.
+// Settings the browser needs. Only public values: the map style is a public URL (no key).
 app.get('/api/client-config', (req, res) => {
-  res.json({ ok: true, aiStreamUrl: config.aiStreamUrl || null });
+  const { provider, styleUrl, bounds, minZoom, maxZoom } = config.navigation.map;
+  res.json({
+    ok: true,
+    aiStreamUrl: config.aiStreamUrl || null,
+    map: {
+      provider, styleUrl, bounds, minZoom, maxZoom, attribution: MAP_ATTRIBUTION,
+    },
+    searchAttribution: ATTRIBUTION,
+  });
 });
 
 app.use('/api', createDocsRoutes());
@@ -137,16 +151,14 @@ app.use('/api/streams', createStreamRoutes(
   }),
   { ingestToken: config.trafficIngestToken, adminToken: config.streamAdminToken },
 ));
-app.use('/api', createHazardRoutes(createHazardController(hazardReports, { adminToken: config.adminToken })));
-app.use('/api', createOsmRoutes(osmProxy));
-app.use('/api/simulation', createSimulationRoutes(simulationReadController, createSimulationController(simulation)));
+app.use('/api/simulation', createSimulationRoutes(simulationReadController, createSimulationController(simulation), { locked: config.production }));
 app.use('/api', createTrafficRoutes(controller));
 app.use('/api', (req, res) => res.status(404).json({ ok: false, code: 'NOT_FOUND', error: `No route ${req.method} ${req.originalUrl}` }));
 
 // Frontend + its two rendering libraries, served locally so the 3D view
-// works without a CDN (map tiles still come from openstreetmap.org).
+// works without a CDN (the map tiles come from OpenFreeMap).
 app.use('/vendor/three', express.static(packageDir('three')));
-app.use('/vendor/leaflet', express.static(path.join(packageDir('leaflet'), 'dist')));
+app.use('/vendor/maplibre-gl', express.static(path.join(packageDir('maplibre-gl'), 'dist')));
 app.use(express.static(FRONTEND_DIR));
 
 // eslint-disable-next-line no-unused-vars
@@ -162,10 +174,8 @@ app.use((err, req, res, next) => {
 });
 
 initTrafficSocket(server, service, {
-  corsOrigin: config.corsOrigin, simulation, streams, network,
+  corsOrigin: allowedOrigin, simulation, streams, network,
 });
-service.start(250);
-network.start();
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
@@ -175,19 +185,33 @@ server.on('error', (err) => {
   throw err;
 });
 
-server.listen(config.port, () => {
-  console.log('');
-  console.log('  Smart Traffic AI - control backend');
-  console.log(`  Swagger     http://localhost:${config.port}/api/docs/`);
-  console.log(`  Dashboard   http://localhost:${config.port}`);
-  console.log(`  API         http://localhost:${config.port}/api/health`);
-  console.log(`  Mobile API  http://localhost:${config.port}/api/v1/config`);
-  console.log(`  Ingest      POST http://localhost:${config.port}/api/traffic`);
-  console.log(`  Reports     http://localhost:${config.port}/admin.html`);
-  console.log(`  Intersections: ${service.ids().join(', ')}`);
-  console.log('');
-  for (const warning of navigationWarnings(config.navigation)) console.warn(`[navigation] ${warning}`);
-});
+// Start order: connect to the database and verify it, then open the API. With
+// MONGODB_URI set the backend refuses to start without a working database;
+// without it (local development) it starts and says so.
+async function start() {
+  try {
+    await connectDatabase(config.mongodbUri, { required: Boolean(config.mongodbUri) });
+  } catch (err) {
+    console.error(`[server] Not starting: ${err.message}`);
+    process.exit(1);
+  }
+  service.start(250);
+  network.start();
+  server.listen(config.port, () => {
+    console.log('');
+    console.log('  Smart Traffic AI - control backend');
+    console.log(`  Swagger     http://localhost:${config.port}/api/docs/`);
+    console.log(`  Dashboard   http://localhost:${config.port}`);
+    console.log(`  API         http://localhost:${config.port}/api/health`);
+    console.log(`  Mobile API  http://localhost:${config.port}/api/v1/config`);
+    console.log(`  Ingest      POST http://localhost:${config.port}/api/traffic`);
+    console.log(`  Admin       http://localhost:${config.port}/admin.html`);
+    console.log(`  Intersections: ${service.ids().join(', ')}`);
+    console.log('');
+    for (const warning of navigationWarnings(config.navigation)) console.warn(`[navigation] ${warning}`);
+  });
+}
+start();
 
 async function shutdown() {
   service.stop();
@@ -200,7 +224,6 @@ async function shutdown() {
   // Finish in-flight history writes; open Socket.IO clients do not delay this.
   if (history) await history.flush();
   if (simulationHistory) await simulationHistory.flush();
-  await hazardReports.flush();
   await disconnectDatabase().catch(() => {});
   process.exit(0);
 }

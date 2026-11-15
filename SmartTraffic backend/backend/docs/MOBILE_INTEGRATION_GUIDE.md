@@ -57,17 +57,45 @@ where marked).
 
 ### Attribution (required)
 
-Places, routes and OpenStreetMap road features come from OpenStreetMap
-data. Responses that need it carry:
+Two services, two attributions (both also in `GET /api/v1/config` → `attribution[]`, each with `requiredFor`):
+
+| Where | Text | Why |
+|---|---|---|
+| On the **map** | `OpenFreeMap © OpenMapTiles Data from OpenStreetMap` (link `https://openfreemap.org`) | OpenFreeMap's terms. MapLibre shows it by itself from the style. |
+| Wherever **search results, places or routes** are shown | `© OpenStreetMap contributors. Powered by Geoapify` (link `https://www.geoapify.com/`) | Geoapify's free-plan terms and the OpenStreetMap licence (ODbL) |
+
+Responses that need the second one carry it:
 
 ```json
-"attribution": { "text": "© OpenStreetMap contributors", "url": "https://www.openstreetmap.org/copyright" }
+"attribution": { "text": "© OpenStreetMap contributors. Powered by Geoapify", "url": "https://www.openstreetmap.org/copyright", "provider": "Geoapify", "providerUrl": "https://www.geoapify.com/" }
 ```
 
-Show this text (linking to the URL) wherever those results are shown, for
-example on the map, in search results and in the about screen. This is an
-OpenStreetMap licence (ODbL) requirement. Your map tile provider has its own
-attribution rules as well.
+Show it, for example, in the corner of the map, in search results and in the about screen.
+
+### What changed with the move to OpenFreeMap and Geoapify
+
+An earlier version of this backend used another map provider (map tiles with a public key, search and routing
+from the same provider). If your app was written against it, check these (the `/api/v1` contract is otherwise unchanged):
+
+| Area | Before | Now |
+|---|---|---|
+| Map | raster tiles with a public key (`map.tiles`) | **OpenFreeMap vector style, no key**: `GET /api/client-config` → `map.styleUrl`, drawn with **MapLibre** (§9). `map.tiles` is gone. |
+| Map area | not part of the API | `map.bounds` (the Kurdistan Region), `map.minZoom`, `map.maxZoom` in `/api/client-config` and `/api/v1/config` (`features.map`) |
+| `attribution` | one text for everything | the map and the search/routing have separate texts (see Attribution above); `/api/client-config` also has `searchAttribution` |
+| Place `id` | `<old provider>:poi:<uuid>` | `geoapify:<id>`, or `hawr:<id>` for a place the operator entered (still opaque: never parse it) |
+| Place `category` / `type` | the old provider's category name and type | `category`: Geoapify category (for example `healthcare.clinic_or_praxis`), `null` possible; `type`: Geoapify result type (`amenity`, `street`, `city`, ...); new `source`: `geoapify` or `hawr` |
+| `addressDetails` | `suburb` and `state` only | `road`, `houseNumber`, `suburb`, `city`, `state`, `postcode`, `country`, `countryCode` when the provider has them (each may be `null`) |
+| Place names | one language | `name` is in the asked `lang` (`ar`, `ku`, `en`) when OpenStreetMap has that name, else the local name |
+| `/places/nearby` | `rating`, `reviewCount`, `openingHours` from the provider | still present for compatibility but **always `null` / `0`**: Geoapify gives none; `address`, `details.*`, `url` stay `null` |
+| `/road-features` | operator features | unchanged: operator features only; `sources` is `{ "operator": "ok" }`; `config.features.roadFeatures.osm` stays as `{ "available": false, "kinds": [] }` |
+| Route alternatives | one request, as many as the provider found | Geoapify has no alternatives option: **up to three** different routes from its route types (balanced, short, fewer turns); a copy of another route is dropped, so 1-3 come back. With the operator's own OSRM server, real alternatives. |
+| Route `summary` | street names | empty: Geoapify gives no street names. Use `steps`. |
+| Route times | provider free-flow | provider free-flow (no traffic); live AI delay is still added by SmartTraffic |
+| New endpoints | | `GET /places/local` (the operator's own places as a map layer), `/saved-places` (a user's favourites, needs a user token) |
+| Rate limits | search 30, routes 20, nearby 20 per minute per IP | search 15, routes 10, nearby 10 per minute per IP (see `config.limits.rateLimits`) |
+| New error codes | | `PROVIDER_QUOTA_EXCEEDED` (503: the server's daily credit budget is used up; has `Retry-After`), `PROVIDER_AUTH_FAILED` (502: server-side search key problem, nothing to fix in the app) |
+| Intersections | five with invented coordinates | only intersections with a surveyed position have `lat`/`lng`; the others have `null` and `positionSource: "unknown"` |
+| Admin | `/api/hazards`, `ADMIN_TOKEN` | removed; use the admin console (`/admin.html`, `NAV_ADMIN_TOKEN`) |
 
 ## 3. App start-up sequence
 
@@ -165,27 +193,33 @@ Call at start-up (and when returning to the foreground after a long time).
   "apiVersion": "1",
   "serverTime": "2026-10-22T21:19:59.143Z",
   "features": {
-    "placeSearch": { "available": true, "provider": "nominatim-compatible" },
+    "map": { "provider": "openfreemap", "styleUrl": "https://tiles.openfreemap.org/styles/liberty",
+             "bounds": { "south": 34.4, "west": 42.3, "north": 37.4, "east": 46.4 }, "minZoom": 7, "maxZoom": 19 },
+    "placeSearch": { "available": true, "provider": "geoapify" },
     "placesNearby": { "available": true, "categories": ["fuel", "charging_station", "parking", "hospital", "pharmacy", "police", "restaurant", "cafe", "atm", "car_repair", "hotel"] },
-    "routing": { "available": true, "provider": "osrm", "profile": "driving", "maxRoutes": 4 },
+    "routing": { "available": true, "provider": "geoapify", "profile": "driving", "maxRoutes": 4 },
     "liveTraffic": {
       "available": true, "monitoredIntersections": 5, "staleAfterSeconds": 15, "recommendedRefreshSeconds": 15,
-      "area": { "center": { "lat": 35.56604, "lng": 45.43338 }, "bbox": { "south": 35.556, "west": 45.4232, "north": 35.5768, "east": 45.4418 }, "surveyed": 0, "placeholders": 5 }
+      "area": null
     },
-    "roadFeatures": { "kinds": ["speed_camera", "speed_bump", "road_closure", "roadworks"], "osm": { "available": true, "kinds": ["speed_camera", "speed_bump"] }, "operator": { "available": true } },
+    "roadFeatures": { "kinds": ["speed_camera", "speed_bump", "road_closure", "roadworks"], "osm": { "available": false, "kinds": [] }, "operator": { "available": true } },
     "reports": { "available": true, "types": ["accident", "traffic_jam", "road_closure", "construction", "hazard"], "requiresDeviceToken": true,
                  "ttlMinutes": { "accident": 60, "traffic_jam": 30, "road_closure": 240, "construction": 1440, "hazard": 120 } }
   },
   "limits": {
     "searchMinLength": 3, "searchMaxLength": 200, "searchMaxResults": 10, "nearbyMaxRadiusMeters": 5000,
     "maxBBoxSpanDeg": 0.5, "reportDescriptionMaxLength": 280,
-    "rateLimits": { "perMinute": 120, "searchPerMinute": 30, "routesPerMinute": 20, "placesPerMinute": 20,
+    "rateLimits": { "perMinute": 120, "searchPerMinute": 15, "routesPerMinute": 10, "placesPerMinute": 10,
                     "deviceRegistrationsPerHour": 10, "reportsPerHour": 10, "votesPerHour": 60 }
   },
-  "attribution": [{ "text": "© OpenStreetMap contributors", "url": "https://www.openstreetmap.org/copyright", "requiredFor": ["placeSearch", "placesNearby", "routing", "roadFeatures"] }]
+  "attribution": [
+    { "text": "OpenFreeMap © OpenMapTiles Data from OpenStreetMap", "url": "https://openfreemap.org", "provider": "OpenFreeMap", "requiredFor": ["map"] },
+    { "text": "© OpenStreetMap contributors. Powered by Geoapify", "url": "https://www.openstreetmap.org/copyright", "provider": "Geoapify", "providerUrl": "https://www.geoapify.com/", "requiredFor": ["placeSearch", "placesNearby", "routing"] }
+  ]
 }
 ```
 
+- `liveTraffic.area` is the box around the intersections that have a surveyed position, or `null` while none has one.
 - `reports.available` and `roadFeatures.operator.available` are `false`
   while the backend's database is down. Hide the "report" button then.
 - `liveTraffic.area` is where SmartTraffic cameras are. Live traffic
@@ -213,26 +247,30 @@ GET /api/v1/places/search?q=hospital&lat=35.5617&lng=45.4329&limit=1
   "scope": "local",
   "count": 1,
   "places": [{
-    "id": "osm:node:9838597717",
-    "name": "مستشفى زيان الاهلي",
-    "address": "مستشفى زيان الاهلي, 206-46, مەڵکەندی ٢٠٦, کانی ئاسکان, سلێمانی, …, العراق",
-    "lat": 35.556448,
-    "lng": 45.4499016,
-    "category": "amenity",
-    "type": "clinic",
-    "addressDetails": { "road": "206-46", "houseNumber": null, "suburb": "کانی ئاسکان", "city": "سلێمانی",
-                        "state": "پارێزگای سلێمانی", "postcode": "46001", "country": "العراق", "countryCode": "iq" }
+    "id": "geoapify:514ae93ea5efb846405943e7902ffcc74140f00103f901db4bee4102000000c00201920315d985d8b3d8aad8b4d981d98920d8b3d981d98ad986",
+    "name": "مستشفى سفين",
+    "address": "مستشفى سفين, کانی ئاسکان, Qanat Street, Sulaymaniyah, 46001, Iraq",
+    "lat": 35.5623836,
+    "lng": 45.4448134,
+    "category": "healthcare.clinic_or_praxis",
+    "type": "amenity",
+    "source": "geoapify",
+    "addressDetails": { "road": "Qanat Street", "houseNumber": null, "suburb": "کانی ئاسکان", "city": "Sulaymaniyah",
+                        "state": "Sulaymaniyah Governorate", "postcode": "46001", "country": "Iraq", "countryCode": "iq" }
   }],
   "cached": false,
-  "attribution": { "text": "© OpenStreetMap contributors", "url": "https://www.openstreetmap.org/copyright" }
+  "attribution": { "text": "© OpenStreetMap contributors. Powered by Geoapify", "url": "https://www.openstreetmap.org/copyright", "provider": "Geoapify", "providerUrl": "https://www.geoapify.com/" }
 }
 ```
 
-- `scope`: `local` = found near `lat`/`lng`; `global` = nothing nearby, so
-  this is the result of an unbounded search.
-- **Search on submit, not on every keystroke.** No autocomplete: the
-  provider allows about one request per second for the whole server.
-  Debouncing is not enough.
+(A real answer, shortened. `name` is in the asked `lang` when OpenStreetMap has that name, else the local name.)
+
+- `scope`: `local` = ranked near `lat`/`lng`; `global` = no point was sent.
+- Places the operator entered (`source: "hawr"`, id `hawr:<id>`) come **first**, then Geoapify results (Iraq only).
+- **Search on submit, not on every keystroke.** No autocomplete: every
+  search uses a provider credit (3,000 a day on the free plan), the
+  server caps its own daily budget and each IP may send 15 searches a
+  minute. Debouncing is not enough.
 - Every field of `addressDetails` may be `null`; `address` may be `null`.
 
 ### 5.3 `GET /places/reverse` and `GET /places/nearby`
@@ -254,20 +292,47 @@ GET /api/v1/places/nearby?lat=35.5617&lng=45.4329&category=fuel&radius=3000&limi
 {
   "ok": true, "category": "fuel", "center": { "lat": 35.5617, "lng": 45.4329 }, "radius": 3000, "count": 1,
   "places": [{
-    "id": "osm:node:123", "name": "Near Fuel", "category": "fuel", "lat": 35.5626, "lng": 45.4329,
-    "distanceMeters": 100, "address": "Main 4",
-    "details": { "brand": "FuelCo", "operator": null, "openingHours": "24/7", "phone": null, "website": null },
-    "url": "https://www.openstreetmap.org/node/123"
+    "id": "geoapify:51afeb17ec86b7464059252aaff089c54140f00103f901ed06c4a001000000", "name": "New Sulemani Gas Station", "category": "fuel", "providerCategory": "service.vehicle.fuel",
+    "lat": 35.5432721, "lng": 45.433805, "distanceMeters": 2046, "rating": null, "reviewCount": 0, "openingHours": null,
+    "address": "New Sulemani Gas Station, ئیبراهیم ئەحمەد, Baban Street, Sulaymaniyah, 46001, Iraq",
+    "details": { "brand": null, "operator": null, "openingHours": null, "phone": null, "website": null }, "url": null
   }],
   "cached": false, "attribution": {…}
 }
 ```
 
-(Illustrative values. Nearest first, straight-line distance; `name` may be `null`.)
+(A real answer, shortened. Nearest first, straight-line distance; `name` may be `null`.)
 `category`: one of `config.features.placesNearby.categories`. `radius`:
-100-5000 m (default 2000). `limit`: 1-50 (default 20). `openingHours` is the
-raw OpenStreetMap
-[opening_hours](https://wiki.openstreetmap.org/wiki/Key:opening_hours) text.
+100-5000 m (default 2000). `limit`: 1-50 (default 20). `rating` is always `null`, `reviewCount` `0` and
+`openingHours` `null`: the search provider has no ratings or opening hours (the keys stay so existing apps do not
+break). `address` is the formatted address; `details` and `url` are always `null`.
+
+### 5.3a Hawr places and saved places
+
+**Hawr places** are important places the operator enters in the admin console (hospitals, mosques, landmarks,
+...). They are a map layer from Hawr's own database and are also returned first by `/places/search`.
+
+```
+GET /api/v1/places/local?south=35.5&west=45.3&north=35.65&east=45.55&categories=hospital,police
+→ { "ok": true, "bbox": {…}, "count": 1, "truncated": false,
+    "places": [{ "id": "6540…", "name": "City Hospital", "nameAr": "مستشفى المدينة", "nameKu": null, "category": "hospital",
+                 "lat": 35.5617, "lng": 45.4329, "description": null, "active": true, "updatedAt": "2026-11-12T10:00:00.000Z" }] }
+```
+
+An area wider than `limits.maxBBoxSpanDeg` is a `400`. An empty list is a real answer: draw nothing. (Creating, changing and
+deleting places is the admin console's job: `POST/PATCH/DELETE /places/local` need the admin token.)
+
+**Saved places** (home, work, favourites) belong to a signed-in user. They need a **user token**
+(`/auth/signup`, `/auth/login`), not a device token; the owner is always the token's user.
+
+| Call | Notes |
+|---|---|
+| `GET /saved-places` | the user's places, newest first: `{ "count", "savedPlaces": [{ "id", "label", "kind", "address", "lat", "lng", "createdAt", "updatedAt" }] }` |
+| `POST /saved-places` | body `{ "label", "lat", "lng", "kind"?, "address"? }`; `kind`: `favorite` (default), `home`, `work`, `other`. At most 100 per user: `409 SAVED_PLACE_LIMIT` |
+| `PATCH /saved-places/{id}` | change any of those fields |
+| `DELETE /saved-places/{id}` | another user's place answers `404` |
+
+Saved places are deleted with the account (`DELETE /auth/me`).
 
 ### 5.4 `POST /routes`
 
@@ -374,7 +439,7 @@ through one. Show the alert and let the user pick another route.
   `arrive`), `modifier` (`uturn`, `sharp right`, `right`, `slight right`,
   `straight`, `slight left`, `left`, `sharp left`), `location` (`[lng, lat]`),
   bearings, `exit` (roundabouts). These are the
-  [OSRM maneuver](https://project-osrm.org/docs/v5.24.0/api/#stepmaneuver-object) values.
+  OSRM-style maneuver values (Hawr maps the provider's turn types to this vocabulary).
 - `instruction` is short **English** text for convenience. For other
   languages, build your own text from `maneuver` + `name`.
 - `distance` / `duration` of a step = from this maneuver to the next. The
@@ -446,9 +511,8 @@ GET /api/v1/traffic?south=35.55&west=45.42&north=35.58&east=45.45
   show "no data", not "no traffic".
 - `level`: `light` / `moderate` / `heavy` from `estimatedDelaySeconds`
   (= `waitingTime` + 2 s × `vehicles`; thresholds 30 s and 90 s by default).
-- `positionSource: "placeholder"` = the intersection position is
-  approximate (not surveyed yet). Draw it as approximate, or not at all.
-  Placeholder intersections are not matched to routes.
+- `positionSource: "unknown"` = nobody has surveyed this intersection:
+  `lat` and `lng` are `null`. Do not draw it; it is never matched to routes.
 - `emergency`: `{ type, direction, since }` while an emergency vehicle is
   detected (signals give it priority). `type` may be `ambulance`, `police`,
   `fire_truck` or `emergency` (service unknown).
@@ -458,7 +522,7 @@ GET /api/v1/traffic?south=35.55&west=45.42&north=35.58&east=45.45
 ### 5.6 `GET /road-features`
 
 ```
-GET /api/v1/road-features?south=35.54&west=45.41&north=35.58&east=45.45[&kinds=speed_camera,road_closure][&sources=operator,osm]
+GET /api/v1/road-features?south=35.54&west=45.41&north=35.58&east=45.45[&kinds=speed_camera,road_closure]
 ```
 
 ```json
@@ -467,28 +531,24 @@ GET /api/v1/road-features?south=35.54&west=45.41&north=35.58&east=45.45[&kinds=s
   "bbox": { "south": 35.54, "west": 45.41, "north": 35.58, "east": 45.45 },
   "count": 2,
   "truncated": false,
-  "sources": { "operator": "ok", "osm": "ok" },
+  "sources": { "operator": "ok" },
   "features": [
     { "id": "671f3a2b9c4e5d6f7a8b9c0d", "kind": "speed_camera", "lat": 35.5617, "lng": 45.4329, "name": null, "description": null,
       "direction": 90, "speedLimitKmh": 60, "source": "City traffic department", "provider": "smarttraffic", "verification": "verified",
-      "active": true, "validFrom": null, "validUntil": null, "url": null, "updatedAt": "2026-10-22T20:00:00.000Z" },
-    { "id": "osm:way:200", "kind": "speed_bump", "lat": 35.5635, "lng": 45.4329, "name": "Speed bump", "description": null,
-      "direction": null, "speedLimitKmh": null, "source": "OpenStreetMap contributors", "provider": "openstreetmap", "verification": "community",
-      "active": true, "validFrom": null, "validUntil": null, "url": "https://www.openstreetmap.org/way/200", "updatedAt": null }
-  ],
-  "attribution": { "text": "© OpenStreetMap contributors", "url": "https://www.openstreetmap.org/copyright" }
+      "active": true, "validFrom": null, "validUntil": null, "url": null, "updatedAt": "2026-10-22T20:00:00.000Z" }
+  ]
 }
 ```
+
+An empty `features` list is a real answer: nothing has been entered for that area.
 
 (Illustrative values.)
 
 - `kind`: `speed_camera`, `speed_bump`, `road_closure`, `roadworks`.
-- `verification`: `verified` (entered by the operator) or `community`
-  (mapped by OpenStreetMap volunteers, may be outdated). Show the
-  difference, e.g. "Mapped by OpenStreetMap contributors, not verified".
-- `sources`: `ok`, `unavailable` (temporarily down; other sources are still
-  returned), `disabled`, `not-requested`. `503 SERVICE_UNAVAILABLE` only when
-  all requested sources failed.
+- `verification`: always `verified` (entered by the operator in the admin console).
+- `sources` is always `{ "operator": "ok" }`: kept for apps written for the
+  earlier multi-source answer. `503 DATABASE_UNAVAILABLE` while the backend's
+  database is down.
 - Features rarely change: cache per area for 10+ minutes on the device and
   re-query only when the map moves outside the cached area. Request a
   slightly larger area than the screen.
@@ -656,18 +716,20 @@ client timeouts never reach the backend's error format.
 
 These are app-side decisions or not available yet:
 
-- **Map tiles and the map SDK.** The backend serves no tiles. Choose a tile
-  provider and SDK (e.g. MapLibre with a commercial vector-tile provider,
-  Mapbox, Google Maps). The public `tile.openstreetmap.org` servers
-  [forbid heavy app use](https://operations.osmfoundation.org/policies/tiles/).
-  If the SDK needs a **public key**: use a key restricted to the app's
-  bundle ID / package name and signing certificate, limited to the tile and
-  SDK APIs only, with usage alerts set. Do not reuse it for anything else.
-  Never put any backend secret in the app.
+- **The map itself and the map SDK.** The backend serves no tiles: the app draws the map with **MapLibre**
+  (MapLibre GL Native for Android and iOS, or a MapLibre binding for your framework) from the style URL in
+  `GET /api/client-config` → `map.styleUrl` (OpenFreeMap's Liberty style, vector tiles). **It needs no key and no
+  account.** Keep the map inside `map.bounds` and between `map.minZoom` and `map.maxZoom`, and show the map attribution.
+  Labels are OpenStreetMap names: a village or street OpenStreetMap does not name has no label (Hawr never invents
+  one). Arabic and Kurdish labels need text shaping, which MapLibre Native does; a web view needs a current browser.
+  **Never put `GEOAPIFY_API_KEY` in the app**: search and routing go through this backend, and the web and mobile
+  apps share one search budget. OpenFreeMap has no search, routing or traffic: do not look for them there.
 - GPS, permissions, background location, route drawing, maneuver
   detection, off-route detection, voice guidance, offline maps.
-- User accounts, favourites / saved places sync, history. Store
-  favourites on the device for now.
+  OpenFreeMap's terms (<https://openfreemap.org/tos/>) allow an app to download areas for offline use only if each
+  download is at most 3,000 tiles or 50 MB, uses at most 4 parallel requests and sends a unique User-Agent that
+  identifies the app; anything larger needs OpenFreeMap's permission (info@openfreemap.org). Do not bulk-download tiles.
+- History. Saved places sync through `/saved-places` (§5.3a); trips are not stored.
 - Speed limits per road segment, lane guidance, toll information, traffic
   on road segments without SmartTraffic cameras.
 - Routing that avoids reported closures (closures are reported as alerts).
@@ -686,15 +748,10 @@ These are app-side decisions or not available yet:
   Ask the backend developer for an environment with the AI feed running
   when you need to see `live` data.
 - **Reports** need the database. `GET /config` shows whether it is up.
-- **Demo data**: the backend developer runs `npm run seed:demo` (in
-  `backend/`). It puts 6 community reports and 4 road features in
-  Sulaymaniyah, inside `south=35.54&west=45.40&north=35.58&east=45.46`.
-  Three of the reports lie on the route `35.5617,45.4329 → 35.5702,45.4418`,
-  so `POST /routes` returns them as `roadAlerts`. The script also prints a
-  token for a demo device that owns two of the reports (`mine: true`). The
-  app does not need it: it registers its own device with `POST /auth/device`,
-  and a report it sends appears straight away in `GET /reports` for that
-  area. A report within 75 m of an active one of the same type confirms
+- **Test data**: there is none. Road features and reports are real records:
+  the operator adds road features in the admin console (`/admin.html`), and
+  your app registers its own device with `POST /auth/device` and sends real
+  reports. A report within 75 m of an active one of the same type confirms
   that one instead of adding a pin (`merged: true`).
 
 ## 11. Mobile integration checklist
@@ -704,12 +761,12 @@ These are app-side decisions or not available yet:
 - [ ] Device token stored in secure storage; renewed before expiry; `401`
       token codes handled by re-registering once.
 - [ ] All received geometry treated as GeoJSON `[lng, lat]`.
-- [ ] OpenStreetMap attribution shown with places, routes and OSM features.
+- [ ] The attribution text (© OpenMapTiles © OpenStreetMap contributors) shown with the map, places and routes.
 - [ ] Search runs on submit only.
 - [ ] Route ETA from `traffic.adjustedDuration`; live-traffic label only when
       `traffic.basis == "live-ai"`; selected route kept by `id`.
 - [ ] `roadAlerts` and `traffic.alerts` shown along the route.
-- [ ] `no-data`, `stale`, `available: false` and `positionSource: "placeholder"`
+- [ ] `no-data`, `stale`, `available: false` and `positionSource: "unknown"`
       rendered as such, never as "no traffic".
 - [ ] Polling intervals per §6, paused in the background.
 - [ ] `429` and `Retry-After` respected.

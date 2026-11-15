@@ -1,73 +1,70 @@
 # Troubleshooting
 
-Start with `GET /api/health`: its `database` and `navigation` blocks show
-the state of MongoDB and of each provider (`circuit`, `failures`,
-`lastError`, `benchedInstances`). Then read the startup log: every
-configuration problem is logged once, with the variable to change.
+Start with `GET /api/health` (database, Geoapify `enabled` / `circuit`) and the admin
+console overview (`/admin.html`: the same plus the daily credit budget
+and the last error). Then read the start-up log: every configuration problem is logged
+once, with the variable to change.
 
 ## Start-up
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Port … is already in use` | Another process on `PORT` | Stop it or change `PORT` in `.env` |
-| `[database] MONGODB_URI is not set` | No database configured | Set `MONGODB_URI`. Without it reports and operator features answer 503. |
-| `[database] MongoDB connection failed … retrying every 15s` | Wrong URI, network, Atlas IP allow-list | Check the URI and Atlas Network Access. The backend keeps retrying. |
-| `[database] Could not prepare collection` | Missing rights, or MongoDB < 5.0 (time-series) | Use a user with readWrite; MongoDB ≥ 5.0 |
-| `[navigation] DEVICE_TOKEN_SECRET is not set` | Dev default | Set it; otherwise every restart signs all apps out |
-| `[navigation] Routing uses the public OSRM demo server` (and Nominatim) | Dev defaults | Fine locally; set provider URLs for production ([DEPLOYMENT.md](DEPLOYMENT.md#external-providers)) |
+| `Port ... is already in use` | Another process on `PORT` | Stop it or change `PORT` in `.env` |
+| `Not starting: MongoDB is not reachable (...)` and the process exits | `MONGODB_URI` is set but the database cannot be reached (three attempts) | Check the URI (user, password, database), that MongoDB is running, and the Atlas Network Access list. The reason printed is the driver's, without the password. |
+| `[database] MONGODB_URI is not set` | No database configured (development only) | Set `MONGODB_URI`. Without it accounts, reports and road features answer `503 DATABASE_UNAVAILABLE`. |
+| `Not starting in production:` followed by a list | `NODE_ENV=production` and a required secret is missing | Set what the list names: [DEPLOYMENT.md](DEPLOYMENT.md#production-start-checks) |
+| `[config] NAV_ADMIN_TOKEN is shorter than 16 characters - administration is DISABLED` | The operator token is too short to be safe | Generate one: `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"` |
+| `[navigation] GEOAPIFY_API_KEY is not set: place search and nearby places are disabled` | No search key configured | Set `GEOAPIFY_API_KEY` ([SETUP_GUIDE.md](SETUP_GUIDE.md#3-map-search-and-routing)). Routing is disabled too unless `ROUTING_OSRM_URL` is set. |
+| `[navigation] Routing uses Geoapify: free-flow times, up to three routes` | Information, not an error | Set `ROUTING_OSRM_URL` to use your own OSRM server instead |
+| `[navigation] DEVICE_TOKEN_SECRET is not set` | Development default | Set it; otherwise every restart signs all apps out |
 
-## Mobile API answers
+## Map, search and routing
+
+| Answer / symptom | Likely cause | What to check |
+|---|---|---|
+| Web map shows "The map could not be set up: the Hawr server did not answer" | `GET /api/client-config` failed | Is the backend running and reachable from this page? Open `/api/client-config`: it must show `map.styleUrl` |
+| Web map shows "The map could not be loaded from OpenFreeMap" | The browser cannot reach `tiles.openfreemap.org` (offline, firewall, or the service is down) | Open `https://tiles.openfreemap.org/styles/liberty` in the browser. A corporate network may block it. If OpenFreeMap itself is down, set `OPENFREEMAP_STYLE_URL` to another style or to your own tile server |
+| Map is blank or black but there is no message | The browser has no WebGL (old GPU driver, hardware acceleration off, some remote desktops) | Open `chrome://gpu` (or `edge://gpu`): WebGL must be enabled. MapLibre needs WebGL |
+| Streets are drawn but there are few names | OpenStreetMap has no name there (small villages and side streets) or the zoom is low: labels appear by zoom level | Zoom in. Missing names are a data gap: add them in OpenStreetMap, or add the place as a *Place* in the admin console |
+| Arabic or Kurdish labels look disconnected or reversed | Old browser without complex-text support | Use a current Chrome, Edge, Firefox or Safari |
+| Map will not move outside Kurdistan | By design | Area and zoom range: `config.navigation.map` in `config/index.js` |
+| `503 FEATURE_DISABLED` on search or routes | No Geoapify key (and no `ROUTING_OSRM_URL`) | `.env`, then restart |
+| `502 PROVIDER_AUTH_FAILED` | The Geoapify key is invalid, disabled, or limited to another IP address | Check `GEOAPIFY_API_KEY` and its allowed IP addresses at <https://myprojects.geoapify.com>. Clients only see a generic message |
+| `503 PROVIDER_QUOTA_EXCEEDED` with `Retry-After` | This server's daily budget (`GEOAPIFY_DAILY_REQUEST_LIMIT`) is used up | Admin overview shows it. Raise the limit (up to your plan) or set `ROUTING_OSRM_URL`; the budget resets at 00:00 UTC. A route search costs 3 credits. A burst from one client can use it up for everyone: lower the per-IP rate limits |
+| `503 PROVIDER_BUSY` with `Retry-After` | Geoapify rate limit (5 requests per second on the free plan), a full local queue, or the circuit is open after repeated faults | Wait; check `circuit` in `/api/health` |
+| `504 PROVIDER_TIMEOUT` / `502 PROVIDER_ERROR` | Geoapify slow or down | <https://apidocs.geoapify.com>; try the call with curl and your key |
+| `422 POINT_NOT_ROUTABLE` / `NO_ROUTE` | A point is far from any road, or the roads are not connected | Normal for water, desert or other countries; choose a point on a road |
+| One or two routes instead of three | Geoapify has no alternatives option: Hawr asks for three route types and drops a route that copies another. Between close points all three are often the same road | Nothing is invented to fill the list. Set `ROUTING_OSRM_URL` for real alternatives |
+| Route summary has no street names | Geoapify's route answer carries no road names | Expected. The steps carry the instructions |
+| `/places/nearby` misses places | Geoapify returns the places OpenStreetMap has in a category | Narrow the radius. The categories are in `models/navigationConstants.js` (`PLACE_CATEGORIES`) |
+| A place I know is missing in search | OpenStreetMap does not have it (or under another name) | Add it as a *Place* in the admin console: it is found first by search |
+| `400 INVALID_REQUEST` from search or routes for a normal query | Geoapify rejected a parameter (its API changed) | Compare with <https://apidocs.geoapify.com>; `npm run smoke` shows the failing call |
+
+## Accounts, tokens and admin
 
 | Answer | Likely cause | What to check |
 |---|---|---|
-| `503 DATABASE_UNAVAILABLE` | MongoDB not configured or disconnected | `/api/health` → `database.status`; logs |
-| `503 FEATURE_DISABLED` | Provider set to `off`, or `NAV_ADMIN_TOKEN` unset for admin calls | `ROUTING_URL` / `GEOCODING_URL` / `OVERPASS_URLS`, `NAV_ADMIN_TOKEN` |
-| `503 PROVIDER_BUSY` with `Retry-After` | Circuit open after repeated provider faults, the local request queue is full, or the provider rate-limits us (429) | `/api/health` → `navigation.<provider>.circuit`, `lastError`. The public services are often overloaded: wait, or use your own instance. |
-| `504 PROVIDER_TIMEOUT` | Provider slow or down | Try the provider URL directly (below) |
-| `502 PROVIDER_ERROR` | Provider answered 5xx or something unreadable | Provider status page; the URL in the env |
-| `422 POINT_NOT_ROUTABLE` / `NO_ROUTE` | A point is far from any road / no road connection | Normal for points in water, fields, or another island |
-| `401 DEVICE_TOKEN_INVALID` for every app after a deploy | `DEVICE_TOKEN_SECRET` changed or unset (per-process secret) | Set a stable secret. Apps re-register automatically. |
-| `401 ADMIN_TOKEN_INVALID` | Wrong or missing admin token | `Authorization: Bearer <NAV_ADMIN_TOKEN>` |
-| `429 RATE_LIMITED` for many users at once | `TRUST_PROXY` not set behind a proxy: all clients share the proxy IP | Set `TRUST_PROXY=1` (Render). Or raise `RATE_LIMIT_*` for carrier-NAT traffic. |
-| `400 … the box may span at most 0.5 degrees` | Map zoomed out too far | The app requests smaller areas, or skips road data at low zoom |
-| `GET /road-features` 200 with `sources.osm: "unavailable"` | Overpass down or benched; operator features are still returned | `/api/health` → `navigation.overpass.benchedInstances`. Retries after `PROVIDER_COOLDOWN_SECONDS`. |
-| `/places/nearby` 504 / 503 | Same: nearby places come only from Overpass | As above |
+| Login fails with `401 INVALID_CREDENTIALS` | Wrong email or password (the same answer for both on purpose) | Sign up first; passwords are 8-128 characters |
+| `409 EMAIL_TAKEN` | The account exists | Log in instead |
+| `401 USER_TOKEN_INVALID` / `DEVICE_TOKEN_INVALID` for everybody after a deploy | The signing secret changed or is unset (a per-process key) | Set stable `USER_TOKEN_SECRET` and `DEVICE_TOKEN_SECRET` |
+| `401 ADMIN_TOKEN_INVALID` or the admin console refuses the token | Wrong token, or `NAV_ADMIN_TOKEN` was changed and the backend not restarted | `.env`, restart |
+| Admin console says "Administration is turned off" | `NAV_ADMIN_TOKEN` unset or shorter than 16 characters | See above |
+| `503 DATABASE_UNAVAILABLE` | The database connection was lost after start | `/api/health` -> `database.status`; the backend retries every 15 s |
+| `429 RATE_LIMITED` for many users at once | Behind a proxy without `TRUST_PROXY`: all clients share the proxy's IP | `TRUST_PROXY=1` |
 
-## Live traffic on routes
+## Browser and apps
 
-`trafficStatus` is `not-on-route` or every route has `traffic.basis: "none"`:
-
-1. Is the AI service posting? `GET /api/v1/traffic` → `status` should be
-   `live` for its intersection. `no-data` = nothing received; `stale` = no
-   update in 15 s (check the AI service and `TRAFFIC_INGEST_TOKEN`).
-2. Is the intersection surveyed? `positionSource: "placeholder"` is never
-   matched to routes. Set `INTERSECTION_LAT` / `INTERSECTION_LNG` for `main`
-   (or the positions in `config/intersections.js`), or, for a demo only,
-   `NAV_ROUTE_INCLUDE_PLACEHOLDERS=true`.
-3. Does the route pass within 60 m of it (`NAV_ROUTE_MATCH_METERS`)? Check
-   `traffic.intersections` on the route.
-4. `reason: "video-unavailable"`: the camera for the approach the route
-   enters by has no video. Nothing is estimated for it.
-
-## Checking a provider directly
-
-```bash
-# OSRM
-curl "https://router.project-osrm.org/route/v1/driving/45.4329,35.5617;45.4418,35.5702?overview=false"
-# Nominatim (an identifying User-Agent is required by its policy)
-curl -A "SmartTraffic-Navigation/1.0.0 (ops@example.org)" "https://nominatim.openstreetmap.org/search?format=jsonv2&q=hospital&limit=1"
-# Overpass
-curl -A "SmartTraffic-Navigation/1.0.0" --data-urlencode 'data=[out:json][timeout:10];node["highway"="speed_camera"](35.55,45.42,35.58,45.45);out 5;' https://overpass-api.de/api/interpreter
-```
-
-The public Overpass instances are frequently overloaded or unreachable for
-minutes at a time. That is why OSM features are optional in the API and an
-own instance is recommended.
+| Symptom | Cause | Fix |
+|---|---|---|
+| Browser console: CORS error on `/api/...` | The page's origin is not in `CORS_ORIGIN` (pages served by the backend itself are same-origin and never need it) | Add the exact origin: `CORS_ORIGIN=https://app.example.com`. Localhost origins are allowed in development only. |
+| Mobile app cannot connect | Wrong base URL; a phone cannot use `localhost` | Use the computer's LAN address (`http://192.168.x.y:3000/api/v1`) on the same Wi-Fi; production needs HTTPS. Native apps are not affected by CORS; a webview app needs its origin in `CORS_ORIGIN`. |
+| Mobile map shows nothing | The app has no map style URL, cannot reach `tiles.openfreemap.org`, or its MapLibre build has no WebGL/OpenGL | Load `styleUrl` from `GET /api/client-config` (no key needed) and check that the device can open it ([MOBILE_INTEGRATION_GUIDE.md](MOBILE_INTEGRATION_GUIDE.md)) |
+| Dashboard shows no intersection on the map | Intersections without a surveyed position are not drawn | Set `INTERSECTION_LAT` / `INTERSECTION_LNG` for `main`, or add coordinates in `config/intersections.js` |
+| Driver routes never show live traffic | No intersection with a surveyed position lies within 60 m of the route, or the AI service is not posting | `GET /api/v1/traffic`: `status` must be `live` and the intersection must have `lat`/`lng` |
 
 ## Tests
 
 | Symptom | Fix |
 |---|---|
-| `navigation database tests … skipped` | Expected without `MONGODB_TEST_URI`. Set it to a MongoDB you may write to (the test creates and drops its own database). |
-| Database tests time out | MongoDB not reachable at that URI (`serverSelectionTimeoutMS` is 5 s) |
-| `test\helpers\navigationHarness.js` listed as a test | Node's default test glob loads every `.js` under `test/`; the helper defines no tests and passes trivially |
+| `npm test` skips the database tests | Set `MONGODB_TEST_URI=mongodb://127.0.0.1:27017`; the tests use a throwaway database and drop it |
+| A test fails with "old map service URLs found" or "files that still mention the removed provider" | Something refers to a removed map service (old public OSRM / Nominatim / Overpass / tile servers, a removed provider or map library) again | The message names the file |

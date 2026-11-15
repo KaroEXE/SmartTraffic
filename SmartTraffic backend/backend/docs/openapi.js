@@ -171,9 +171,24 @@ operation('/api/health', 'get', 'System', 'getHealth', 'Backend and database hea
   status: str, uptimeSeconds: num, serverTime: date, intersections: { type: 'integer' },
   aiFeeds: object({ connected: { type: 'integer' }, total: { type: 'integer' } }),
   ingestion: object({ intersectionsWithData: { type: 'integer' }, tokenRequired: bool }), database: { type: 'object' },
-  navigation: { type: 'object', description: 'Mobile navigation API: provider status (requests, cache hits, failures, last error code), database, device-token and admin settings.' },
+  navigation: { type: 'object', description: 'Navigation API status, without budgets or error text (those are in GET /api/v1/admin/overview): search provider (Geoapify) enabled and circuit (closed or open), routing and places enabled, database connected or unavailable.' },
 }));
-operation('/api/client-config', 'get', 'System', 'getClientConfig', 'Public browser configuration', ok({ aiStreamUrl: { type: 'string', nullable: true } }));
+operation('/api/client-config', 'get', 'System', 'getClientConfig', 'Public browser configuration', ok({
+  aiStreamUrl: { type: 'string', nullable: true },
+  map: {
+    type: 'object',
+    description: 'The map for browsers and apps: OpenFreeMap vector tiles (no key, no request limit) drawn with MapLibre. Only public values. Load styleUrl in a MapLibre map, keep the map inside bounds and between minZoom and maxZoom, and show the attribution (MapLibre adds the style attribution by itself).',
+    properties: {
+      provider: { type: 'string', enum: ['openfreemap'] },
+      styleUrl: { type: 'string', example: 'https://tiles.openfreemap.org/styles/liberty', description: 'MapLibre style JSON (OPENFREEMAP_STYLE_URL).' },
+      bounds: { type: 'object', description: 'The area the map is fixed to (the Kurdistan Region).', properties: { south: { type: 'number' }, west: { type: 'number' }, north: { type: 'number' }, east: { type: 'number' } } },
+      minZoom: { type: 'integer' },
+      maxZoom: { type: 'integer' },
+      attribution: { type: 'object', description: 'Show this wherever the map is shown (OpenFreeMap terms).', properties: { text: { type: 'string' }, url: { type: 'string' }, provider: { type: 'string' } } },
+    },
+  },
+  searchAttribution: { type: 'object', description: 'Show this wherever search results, places or routes are shown (Geoapify terms).', properties: { text: { type: 'string' }, url: { type: 'string' }, provider: { type: 'string' }, providerUrl: { type: 'string' } } },
+}));
 operation('/api/traffic', 'post', 'Live traffic', 'postTraffic', 'Send a perception observation to the live decision engine', ref('IngestionResponse'), {
   security: [{ ingestToken: [] }],
   description: 'Post about once per second per intersection, using one producer per intersection. All four traffic approaches are required (null for an approach without a source). Directions indicate where vehicles come from. Body limit: 100 KB. When the backend sets TRAFFIC_INGEST_TOKEN, send it as "Authorization: Bearer <token>". Data tagged as simulated is rejected.',
@@ -368,7 +383,7 @@ module.exports = {
   openapi: '3.0.3',
   info: {
     title: 'Smart Traffic AI API', version: require('../package.json').version,
-    description: 'REST API for the public navigation mobile app (/api/v1, tags "Mobile: ..."), the Python/YOLO perception integration, live dashboard, historical records and isolated simulator. POST /api/traffic requires the ingest token when TRAFFIC_INGEST_TOKEN is set. Try it out sends requests to this backend. Socket.IO events and the full endpoint reference: backend/docs/API_REFERENCE.md; mobile integration: backend/docs/MOBILE_INTEGRATION_GUIDE.md.',
+    description: 'REST API for the navigation apps (/api/v1: places and routes come from Geoapify or an own OSRM server, the map from OpenFreeMap), the admin console (/api/v1/admin/*, tag "Admin console"), the Python/YOLO perception integration, live dashboard, historical records and isolated simulator. In production the simulation write endpoints answer 403. POST /api/traffic requires the ingest token when TRAFFIC_INGEST_TOKEN is set. Try it out sends requests to this backend. Socket.IO events and the full endpoint reference: backend/docs/API_REFERENCE.md; mobile integration: backend/docs/MOBILE_INTEGRATION_GUIDE.md.',
   },
   servers: [{ url: '/', description: 'Current backend host' }],
   tags: [

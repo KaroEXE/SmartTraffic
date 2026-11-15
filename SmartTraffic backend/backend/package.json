@@ -8,8 +8,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test",
-    "smoke": "node scripts/smokeNavigation.js",
-    "seed:demo": "node scripts/seedDemo.js"
+    "smoke": "node scripts/smokeNavigation.js"
   },
   "engines": {
     "node": ">=18"
@@ -19,7 +18,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.22.3",
-    "leaflet": "^1.9.4",
+    "maplibre-gl": "^6.18.0",
     "mongoose": "^8.24.5",
     "socket.io": "^4.8.1",
     "swagger-ui-dist": "^5.33.1",

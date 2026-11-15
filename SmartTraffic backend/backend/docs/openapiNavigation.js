@@ -5,7 +5,7 @@
  * test/navigationApi.test.js checks that every route is documented.
  */
 const {
-  FEATURE_KINDS, REPORT_TYPES, PUBLIC_REPORT_STATUSES, MODERATION_STATUSES, REPORT_VOTES, PLATFORMS, PLACE_CATEGORIES, LIMITS,
+  FEATURE_KINDS, REPORT_TYPES, PUBLIC_REPORT_STATUSES, MODERATION_STATUSES, REPORT_VOTES, PLATFORMS, PLACE_CATEGORIES, LOCAL_PLACE_CATEGORIES, SAVED_PLACE_KINDS, LIMITS,
 } = require('../models/navigationConstants');
 const { DIRECTIONS } = require('../utils/validation');
 
@@ -44,19 +44,24 @@ module.exports = function navigationSpec({
           'CANNOT_VOTE_OWN_REPORT', 'NOT_REPORT_OWNER', 'ALREADY_VOTED', 'REPORT_NOT_ACTIVE', 'DUPLICATE_REPORT',
           'REPORT_LIMIT_REACHED', 'RATE_LIMITED', 'NO_ROUTE', 'POINT_NOT_ROUTABLE',
           'PROVIDER_ERROR', 'PROVIDER_UNREACHABLE', 'PROVIDER_TIMEOUT', 'PROVIDER_BUSY',
+          'PROVIDER_QUOTA_EXCEEDED', 'PROVIDER_AUTH_FAILED', 'SAVED_PLACE_LIMIT',
           'DATABASE_UNAVAILABLE', 'FEATURE_DISABLED', 'SERVICE_UNAVAILABLE', 'INTERNAL_ERROR'],
       },
       error: { type: 'string', description: 'English description for logs and developers; may change.' },
       details: array(str),
       retryAfterSeconds: int,
       reportId: { type: 'string', description: 'DUPLICATE_REPORT only: the existing report.' },
-      sources: { type: 'object', description: 'SERVICE_UNAVAILABLE on /road-features only: status per source.' },
     }, ['ok', 'code', 'error']),
     LatLng: object({ lat, lng }, ['lat', 'lng']),
     BBox: object({
       south: num, west: num, north: num, east: num,
     }, ['south', 'west', 'north', 'east']),
-    Attribution: object({ text: { type: 'string', example: '© OpenStreetMap contributors' }, url: str }),
+    Attribution: object({
+      text: { type: 'string', example: '© OpenStreetMap contributors. Powered by Geoapify', description: 'Show this text wherever the map, search results or routes are shown (OpenFreeMap and Geoapify terms).' },
+      url: str,
+      provider: { type: 'string', enum: ['OpenFreeMap', 'Geoapify'] },
+      providerUrl: { type: 'string', description: 'Link for the provider name (Geoapify).' },
+    }),
     LineString: object({
       type: enumOf(['LineString']),
       coordinates: { type: 'array', items: { type: 'array', items: num, minItems: 2, maxItems: 2 }, description: 'GeoJSON positions [lng, lat] (longitude first).' },
@@ -84,29 +89,36 @@ module.exports = function navigationSpec({
     }, ['tokenType', 'token', 'expiresAt', 'user']),
 
     Place: object({
-      id: { type: 'string', example: 'osm:way:123456' },
+      id: { type: 'string', example: 'geoapify:511f58440367b746405979', description: '"geoapify:<id>" for a search provider result, "hawr:<id>" for one of the operator\'s own local places. Opaque: never parse it.' },
       name: str,
       address: nullable(str),
       lat,
       lng,
-      category: nullable({ type: 'string', description: 'OpenStreetMap class, e.g. amenity, highway, place.' }),
-      type: nullable({ type: 'string', description: 'OpenStreetMap type, e.g. hospital, residential, city.' }),
+      category: nullable({ type: 'string', description: 'Geoapify category (amenity, healthcare.hospital, ...) or, for a Hawr local place, its category.' }),
+      type: nullable({ type: 'string', description: 'Geoapify result type (city, street, amenity, building, ...), or "local" for a Hawr local place.' }),
+      source: { type: 'string', enum: ['geoapify', 'hawr'] },
       addressDetails: nullable(object({
         road: nullable(str), houseNumber: nullable(str), suburb: nullable(str), city: nullable(str),
         state: nullable(str), postcode: nullable(str), country: nullable(str), countryCode: nullable(str),
       })),
     }, ['id', 'name', 'lat', 'lng']),
     NearbyPlace: object({
-      id: str, name: nullable(str), category: enumOf(Object.keys(PLACE_CATEGORIES)), lat, lng,
-      distanceMeters: int, address: nullable(str),
+      id: str, name: nullable(str), category: enumOf(Object.keys(PLACE_CATEGORIES)),
+      providerCategory: nullable({ type: 'string', description: "The provider's most specific category, e.g. service.vehicle.fuel." }),
+      lat, lng,
+      distanceMeters: int,
+      rating: nullable({ type: 'number', description: 'Average rating; null when there are no reviews.' }),
+      reviewCount: int,
+      openingHours: nullable({ type: 'object', description: 'Keys mon..sun, each a list of { open, close } ("HH:MM", Asia/Baghdad). null: no hours on record.' }),
+      address: { type: 'string', nullable: true, description: 'Always null: kept so apps written for the earlier answer do not break.' },
       details: object({
         brand: nullable(str), operator: nullable(str), openingHours: nullable(str), phone: nullable(str), website: nullable(str),
       }),
-      url: str,
+      url: { type: 'string', nullable: true, description: 'Always null: kept so apps written for the earlier answer do not break.' },
     }),
 
     Maneuver: object({
-      type: nullable({ type: 'string', description: 'OSRM maneuver type: depart, turn, new name, continue, merge, on ramp, off ramp, fork, end of road, roundabout, rotary, exit roundabout, notification, arrive.' }),
+      type: nullable({ type: 'string', description: 'Maneuver type (OSRM-style): depart, turn, new name, continue, merge, on ramp, off ramp, fork, end of road, roundabout, rotary, exit roundabout, notification, arrive.' }),
       modifier: nullable({ type: 'string', description: 'uturn, sharp right, right, slight right, straight, slight left, left, sharp left.' }),
       location: { type: 'array', items: num, description: '[lng, lat] of the maneuver.' },
       bearingBefore: nullable(num), bearingAfter: nullable(num),
@@ -120,7 +132,7 @@ module.exports = function navigationSpec({
       maneuver: ref('Maneuver'),
     }),
     RouteIntersection: object({
-      id: str, name: str, positionSource: nullable(enumOf(['surveyed', 'placeholder'])),
+      id: str, name: str, positionSource: nullable(enumOf(['surveyed', 'unknown'])),
       status: enumOf(['live', 'stale', 'no-data']),
       alongMeters: { type: 'integer', description: 'Distance from the route start.' },
       approach: nullable(enumOf(DIRECTIONS, { description: 'Approach the route enters by (where vehicles come from).' })),
@@ -177,7 +189,7 @@ module.exports = function navigationSpec({
     }),
     TrafficIntersection: object({
       id: str, name: str, lat, lng,
-      positionSource: nullable(enumOf(['surveyed', 'placeholder'], { description: 'placeholder = approximate position, not surveyed.' })),
+      positionSource: nullable(enumOf(['surveyed', 'unknown'], { description: 'unknown = no surveyed position (lat and lng are null): never matched to a route.' })),
       status: enumOf(['live', 'stale', 'no-data']),
       lastUpdate: nullableDate, ageSeconds: nullable(num),
       level: nullable(enumOf(['light', 'moderate', 'heavy'])),
@@ -187,14 +199,14 @@ module.exports = function navigationSpec({
     }),
 
     RoadFeature: object({
-      id: { type: 'string', description: '24-hex id (operator) or osm:<type>:<id> (OpenStreetMap).' },
+      id: { type: 'string', description: '24-hex id.' },
       kind: enumOf(FEATURE_KINDS),
       lat, lng, name: nullable(str), description: nullable(str),
       direction: nullable({ type: 'number', description: 'Compass bearing (degrees) it applies to; null = both ways / unknown.' }),
       speedLimitKmh: nullable(int),
       source: str,
-      provider: enumOf(['smarttraffic', 'openstreetmap']),
-      verification: enumOf(['verified', 'community']),
+      provider: enumOf(['smarttraffic']),
+      verification: enumOf(['verified']),
       active: bool, validFrom: nullableDate, validUntil: nullableDate, url: nullable(str), updatedAt: nullableDate,
     }),
     RoadFeatureInput: object({
@@ -206,6 +218,49 @@ module.exports = function navigationSpec({
       source: nullable({ type: 'string', maxLength: LIMITS.sourceLength }),
       active: { type: 'boolean', default: true },
       validFrom: nullableDate, validUntil: nullableDate,
+    }),
+    AdminUser: object({
+      id: objectId, email: str, name: nullable(str), createdAt: date,
+    }, ['id', 'email', 'createdAt']),
+    AdminOverview: object({
+      generatedAt: date,
+      system: { type: 'object', description: 'Search provider (Geoapify: circuit, daily credit budget) and the optional own OSRM, routing, places and database status.' },
+      traffic: object({
+        monitoredIntersections: int, live: int, stale: int, noData: int,
+      }),
+      users: object({ available: bool, total: int, last7Days: int }, ['available']),
+      reports: object({
+        available: bool,
+        byStatus: { type: 'object', additionalProperties: int, description: 'Reports by the status they show (active, expired, resolved, ...).' },
+        activeByType: { type: 'object', additionalProperties: int },
+      }, ['available']),
+      roadFeatures: object({
+        available: bool, total: int, active: int, byKind: { type: 'object', additionalProperties: int },
+      }, ['available']),
+      localPlaces: object({
+        available: bool, total: int, active: int, byCategory: { type: 'object', additionalProperties: int },
+      }, ['available']),
+    }, ['generatedAt', 'system', 'traffic', 'users', 'reports', 'roadFeatures', 'localPlaces']),
+    LocalPlace: object({
+      id: objectId, name: str, nameAr: nullable(str), nameKu: nullable(str),
+      category: enumOf(LOCAL_PLACE_CATEGORIES), lat, lng, description: nullable(str), active: bool, updatedAt: nullableDate,
+    }, ['id', 'name', 'category', 'lat', 'lng']),
+    LocalPlaceInput: object({
+      name: { type: 'string', maxLength: LIMITS.nameLength },
+      nameAr: nullable({ type: 'string', maxLength: LIMITS.nameLength }),
+      nameKu: nullable({ type: 'string', maxLength: LIMITS.nameLength, description: 'Sorani Kurdish' }),
+      category: enumOf(LOCAL_PLACE_CATEGORIES), lat, lng,
+      description: nullable({ type: 'string', maxLength: LIMITS.descriptionLength }),
+      active: { type: 'boolean', default: true },
+    }),
+    SavedPlace: object({
+      id: objectId, label: str, kind: enumOf(SAVED_PLACE_KINDS), address: nullable(str), lat, lng, createdAt: date, updatedAt: date,
+    }, ['id', 'label', 'kind', 'lat', 'lng']),
+    SavedPlaceInput: object({
+      label: { type: 'string', maxLength: LIMITS.savedLabelLength },
+      kind: { ...enumOf(SAVED_PLACE_KINDS), default: 'favorite' },
+      address: nullable({ type: 'string', maxLength: LIMITS.addressLength }),
+      lat, lng,
     }),
     RoadReport: object({
       id: objectId, type: enumOf(REPORT_TYPES), label: str, lat, lng,
@@ -226,7 +281,7 @@ module.exports = function navigationSpec({
   };
   const tags = {
     app: 'Mobile: app', account: 'Mobile: account', places: 'Mobile: places', routes: 'Mobile: routes', traffic: 'Mobile: traffic',
-    features: 'Mobile: road features', reports: 'Mobile: community reports',
+    features: 'Mobile: road features', reports: 'Mobile: community reports', admin: 'Admin console', local: 'Hawr places', saved: 'Saved places',
   };
 
   op('/api/v1/config', 'get', {
@@ -373,7 +428,7 @@ module.exports = function navigationSpec({
 
   op('/api/v1/places/search', 'get', {
     tags: [tags.places], operationId: 'searchPlaces', summary: 'Search places and addresses',
-    description: 'Search on submit, not on every keystroke: the default provider allows about one request per second for the whole server. With lat/lng, results near that point come first (scope "local"); if there are none, the search runs without the bound (scope "global"). Show the attribution.',
+    description: 'Search on submit, not on every keystroke: every search costs a provider credit (Geoapify, 3,000 a day on the free plan), is cached and is limited per client. Hawr\'s own local places (entered by the operator) come first, then Iraq results from Geoapify ranked near lat/lng (scope "local") or without a point ("global"). Names come in the reader\'s language (ar, ku, en) when the provider has one, else the local name. Results without a position are never returned. Show the attribution.',
     parameters: [
       query('q', { type: 'string', minLength: LIMITS.searchMinLength, maxLength: LIMITS.searchMaxLength }, 'Search text', true),
       query('lat', { type: 'number' }, 'Bias towards this point (with lng), e.g. the user position'),
@@ -399,7 +454,7 @@ module.exports = function navigationSpec({
   });
 
   op('/api/v1/places/nearby', 'get', {
-    tags: [tags.places], operationId: 'nearbyPlaces', summary: 'Places of one category around a point (OpenStreetMap)',
+    tags: [tags.places], operationId: 'nearbyPlaces', summary: 'Places of one category around a point (Geoapify)',
     parameters: [
       query('lat', { type: 'number' }, null, true), query('lng', { type: 'number' }, null, true),
       query('category', enumOf(Object.keys(PLACE_CATEGORIES)), null, true),
@@ -416,7 +471,7 @@ module.exports = function navigationSpec({
 
   op('/api/v1/routes', 'post', {
     tags: [tags.routes], operationId: 'planRoutes', summary: 'Road routes ranked by live-traffic-adjusted travel time',
-    description: 'Routes from the routing provider, each with the live AI delay at monitored intersections on it and nearby community reports and closures, ranked by traffic.adjustedDuration. Re-send the same request (every 30-60 s while choosing or driving) for fresh ETAs: provider routes are cached for ROUTING_CACHE_TTL_SECONDS, traffic is always current. Geometry is GeoJSON ([lng, lat]).',
+    description: 'Routes from Geoapify (free-flow times: no provider traffic) or from your own OSRM when one is configured, each with the live AI delay at monitored intersections on it and nearby community reports and closures, ranked by traffic.adjustedDuration. Geoapify has no alternatives parameter: up to three real, different routes come from its route types (balanced, short, fewer turns), and a route that copies another is dropped, so 1 to 3 routes are returned (one provider request each). Geoapify gives no street names: summary is empty. Re-send the same request (every 30-60 s while choosing or driving) for fresh ETAs: provider routes are cached for ROUTING_CACHE_TTL_SECONDS, traffic is always current. Geometry is GeoJSON ([lng, lat]).',
     requestBody: {
       required: true,
       content: json(object({
@@ -449,17 +504,16 @@ module.exports = function navigationSpec({
 
   op('/api/v1/road-features', 'get', {
     tags: [tags.features], operationId: 'listRoadFeatures', summary: 'Speed cameras, speed bumps, closures and roadworks in a map area',
-    description: 'Operator features (verified, from the database) and OpenStreetMap features (community-mapped) in one list. `sources` reports each source: ok, unavailable, disabled or not-requested; a failed source does not fail the request (503 only when all fail). Features change rarely: cache them per area for several minutes.',
+    description: 'Features entered by the operator in the admin console (verified, from the database). `sources` is always { operator: "ok" }, kept for apps written for the earlier multi-source answer. Features change rarely: cache them per area for several minutes.',
     parameters: [
       ...bboxParams(true),
       query('kinds', { type: 'string', example: 'speed_camera,road_closure' }, `Comma-separated: ${FEATURE_KINDS.join(', ')}`),
-      query('sources', { type: 'string', example: 'operator,osm' }, 'Comma-separated: operator, osm (default both)'),
     ],
     responses: {
       200: response('Features', ok({
-        bbox: ref('BBox'), count: int, truncated: bool, sources: object({ operator: str, osm: str }), features: array(ref('RoadFeature')), attribution: ref('Attribution'),
+        bbox: ref('BBox'), count: int, truncated: bool, sources: object({ operator: str }), features: array(ref('RoadFeature')),
       })),
-      400: error('Invalid query'), 429: rateLimited, 503: error('Every requested source is unavailable'),
+      400: error('Invalid query'), 429: rateLimited, 503: error('Database not connected (DATABASE_UNAVAILABLE)'),
     },
   });
   op('/api/v1/road-features', 'post', {
@@ -574,10 +628,106 @@ module.exports = function navigationSpec({
     },
   });
 
+  op('/api/v1/places/local', 'get', {
+    tags: [tags.local], operationId: 'listLocalPlaces', summary: "Hawr's own important places in a map area",
+    description: 'Places the operator entered (hospitals, mosques, landmarks ...): a map layer from the database, nothing from a provider. They are also found by GET /places/search. An empty list is a real answer.',
+    parameters: [...bboxParams(true), query('categories', { type: 'string', example: 'hospital,police' }, `Comma-separated: ${LOCAL_PLACE_CATEGORIES.join(', ')}`)],
+    responses: {
+      200: response('Places', ok({ bbox: ref('BBox'), count: int, truncated: bool, places: array(ref('LocalPlace')) })),
+      400: error('Invalid query'), 429: rateLimited, 503: error('Database not connected'),
+    },
+  });
+  op('/api/v1/places/local', 'post', {
+    tags: [tags.local], operationId: 'createLocalPlace', summary: 'Add a Hawr local place (admin)', security: admin,
+    requestBody: { required: true, content: json({ allOf: [ref('LocalPlaceInput'), { required: ['name', 'category', 'lat', 'lng'] }] }, { hospital: { value: { name: 'City Hospital', nameAr: 'مستشفى المدينة', category: 'hospital', lat: 35.5617, lng: 45.4329 } } }) },
+    responses: { 201: response('Created', ok({ place: ref('LocalPlace') })), 400: error('Invalid place'), 401: error('Missing or invalid admin token'), 415: error('Not JSON'), 503: error('Admin disabled or database not connected') },
+  });
+  op('/api/v1/places/local/{id}', 'get', {
+    tags: [tags.local], operationId: 'getLocalPlace', summary: 'One Hawr local place', parameters: [idParam],
+    responses: { 200: response('Place', ok({ place: ref('LocalPlace') })), 400: error('Invalid id'), 404: error('Not found'), 503: error('Database not connected') },
+  });
+  op('/api/v1/places/local/{id}', 'patch', {
+    tags: [tags.local], operationId: 'updateLocalPlace', summary: 'Change a Hawr local place (admin)', security: admin, parameters: [idParam],
+    requestBody: { required: true, content: json(ref('LocalPlaceInput'), { hide: { value: { active: false } } }) },
+    responses: { 200: response('Updated', ok({ place: ref('LocalPlace') })), 400: error('Invalid change'), 401: error('Missing or invalid admin token'), 404: error('Not found'), 415: error('Not JSON'), 503: error('Admin disabled or database not connected') },
+  });
+  op('/api/v1/places/local/{id}', 'delete', {
+    tags: [tags.local], operationId: 'deleteLocalPlace', summary: 'Delete a Hawr local place (admin)', security: admin, parameters: [idParam],
+    responses: { 200: response('Deleted', ok({ deleted: str, place: ref('LocalPlace') })), 400: error('Invalid id'), 401: error('Missing or invalid admin token'), 404: error('Not found'), 503: error('Admin disabled or database not connected') },
+  });
+  op('/api/v1/saved-places', 'get', {
+    tags: [tags.saved], operationId: 'listSavedPlaces', summary: "The signed-in user's saved places", security: user,
+    responses: { 200: response('Saved places, newest first', ok({ count: int, savedPlaces: array(ref('SavedPlace')) })), 401: error('Missing, invalid or expired user token'), 503: error('Database not connected') },
+  });
+  op('/api/v1/saved-places', 'post', {
+    tags: [tags.saved], operationId: 'createSavedPlace', summary: 'Save a place (home, work, a favourite)', security: user,
+    description: `At most ${LIMITS.maxSavedPlaces} per user (409 SAVED_PLACE_LIMIT). The owner is always the user of the token.`,
+    requestBody: { required: true, content: json({ allOf: [ref('SavedPlaceInput'), { required: ['label', 'lat', 'lng'] }] }, { home: { value: { label: 'Home', kind: 'home', lat: 36.1911, lng: 44.0092, address: 'Erbil' } } }) },
+    responses: { 201: response('Saved', ok({ savedPlace: ref('SavedPlace') })), 400: error('Invalid place'), 401: error('Missing, invalid or expired user token'), 409: error('Saved place limit reached'), 415: error('Not JSON'), 503: error('Database not connected') },
+  });
+  op('/api/v1/saved-places/{id}', 'patch', {
+    tags: [tags.saved], operationId: 'updateSavedPlace', summary: 'Change one of your saved places', security: user, parameters: [idParam],
+    requestBody: { required: true, content: json(ref('SavedPlaceInput'), { rename: { value: { label: 'Work' } } }) },
+    responses: { 200: response('Updated', ok({ savedPlace: ref('SavedPlace') })), 400: error('Invalid change'), 401: error('Missing, invalid or expired user token'), 404: error('Not found (or not yours)'), 415: error('Not JSON'), 503: error('Database not connected') },
+  });
+  op('/api/v1/saved-places/{id}', 'delete', {
+    tags: [tags.saved], operationId: 'deleteSavedPlace', summary: 'Delete one of your saved places', security: user, parameters: [idParam],
+    responses: { 200: response('Deleted', ok({ deleted: str, savedPlace: ref('SavedPlace') })), 400: error('Invalid id'), 401: error('Missing, invalid or expired user token'), 404: error('Not found (or not yours)'), 503: error('Database not connected') },
+  });
+
+  const pageParams = [
+    query('page', { type: 'integer', minimum: 1, default: 1 }),
+    query('limit', { type: 'integer', minimum: 1, maximum: 100, default: 25 }),
+  ];
+  const adminErrors = {
+    400: error('Invalid query'), 401: error('Missing or invalid admin token'), 503: error('Admin disabled (NAV_ADMIN_TOKEN not set) or database not connected'),
+  };
+  op('/api/v1/admin/overview', 'get', {
+    tags: [tags.admin], operationId: 'adminOverview', summary: 'System health, live traffic feed and statistics (admin)',
+    description: 'One call for the admin console start page. A section whose data is in the database answers { available: false } while the database is down; nothing is invented.',
+    security: admin,
+    responses: { 200: response('Overview', ok({ generatedAt: date, system: { type: 'object' }, traffic: { type: 'object' }, users: { type: 'object' }, reports: { type: 'object' }, roadFeatures: { type: 'object' } })), ...adminErrors },
+  });
+  op('/api/v1/admin/users', 'get', {
+    tags: [tags.admin], operationId: 'adminListUsers', summary: 'Accounts, newest first (admin)',
+    description: 'Email, name and creation time only: password data is never returned.',
+    security: admin,
+    parameters: [query('q', { type: 'string', maxLength: 80 }, 'Start of an email address'), ...pageParams],
+    responses: { 200: response('Users', ok({ users: array(ref('AdminUser')), total: int, page: int, limit: int })), ...adminErrors },
+  });
+  op('/api/v1/admin/reports', 'get', {
+    tags: [tags.admin], operationId: 'adminListReports', summary: 'Driver reports in any status, newest first (admin)',
+    description: 'Moderate with PATCH /api/v1/reports/{id}.',
+    security: admin,
+    parameters: [
+      query('status', enumOf(PUBLIC_REPORT_STATUSES), 'One status'),
+      query('type', enumOf(REPORT_TYPES), 'One type'),
+      ...pageParams,
+    ],
+    responses: { 200: response('Reports', ok({ reports: array(ref('RoadReport')), total: int, page: int, limit: int })), ...adminErrors },
+  });
+  op('/api/v1/admin/places', 'get', {
+    tags: [tags.admin], operationId: 'adminListPlaces', summary: 'Hawr local places, active or not, newest first (admin)',
+    description: 'Change them with POST, PATCH and DELETE on /api/v1/places/local.', security: admin,
+    parameters: [query('category', enumOf(LOCAL_PLACE_CATEGORIES), 'One category'), query('active', { type: 'boolean' }, 'Only active or only inactive'), ...pageParams],
+    responses: { 200: response('Places', ok({ places: array(ref('LocalPlace')), total: int, page: int, limit: int })), ...adminErrors },
+  });
+  op('/api/v1/admin/road-features', 'get', {
+    tags: [tags.admin], operationId: 'adminListRoadFeatures', summary: 'Operator road features, active or not, newest first (admin)',
+    description: 'Change them with POST, PATCH and DELETE on /api/v1/road-features.',
+    security: admin,
+    parameters: [
+      query('kind', enumOf(FEATURE_KINDS), 'One kind'),
+      query('active', { type: 'boolean' }, 'Only active or only inactive features'),
+      ...pageParams,
+    ],
+    responses: { 200: response('Features', ok({ features: array(ref('RoadFeature')), total: int, page: int, limit: int })), ...adminErrors },
+  });
+
   return {
     paths,
     schemas,
-    tags: Object.values(tags).map((name) => ({ name, description: 'Mobile navigation API (/api/v1). See docs/MOBILE_INTEGRATION_GUIDE.md.' })),
+    tags: Object.values(tags).map((name) => ({ name, description: 'Navigation API (/api/v1) used by the web app, the mobile app and the admin console. See docs/MOBILE_INTEGRATION_GUIDE.md.' })),
     securitySchemes: {
       deviceToken: {
         type: 'http', scheme: 'bearer', bearerFormat: 'JWT', description: 'Anonymous device token from POST /api/v1/auth/device.',

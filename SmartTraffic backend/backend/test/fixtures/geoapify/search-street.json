@@ -1,0 +1,204 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright"
+    },
+    "name": "Salim Street",
+    "ref": "2",
+    "other_names": {
+     "ref": "2",
+     "name": "شەقامی سالم",
+     "name:ckb": "شەقامی سالم"
+    },
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "district": "Sulaymaniyah District",
+    "suburb": "کانی ئاسکان",
+    "street": "Salim Street",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.4322017,
+    "lat": 35.5564885,
+    "result_type": "street",
+    "distance": 582.9257742131343,
+    "formatted": "کانی ئاسکان, Salim Street, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "کانی ئاسکان",
+    "address_line2": "Salim Street, Sulaymaniyah, 46001, Iraq",
+    "timezone": {
+     "name": "Asia/Baghdad",
+     "offset_STD": "+03:00",
+     "offset_DST": "+03:00",
+     "offset_STD_seconds": 10800,
+     "offset_DST_seconds": 10800
+    },
+    "plus_code": "8H77HC4J+HV",
+    "rank": {
+     "importance": 0.05339128786144805,
+     "popularity": 2.6964600001683268,
+     "confidence": 1,
+     "confidence_street_level": 1,
+     "match_type": "full_match"
+    },
+    "place_id": "514763a36252b7464059d00ce2033bc74140f00102f9017c13021300000000c0020492030c53616c696d20537472656574"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.4322017,
+     35.5564885
+    ]
+   },
+   "bbox": [
+    45.4293369,
+    35.5558183,
+    45.4350686,
+    35.5572202
+   ]
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright"
+    },
+    "name": "Salim Street",
+    "other_names": {
+     "name": "شەقامی سالم",
+     "name:ckb": "شەقامی سالم"
+    },
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "district": "Sulaymaniyah District",
+    "suburb": "چوارباخ",
+    "street": "Salim Street",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.4289518,
+    "lat": 35.5572419,
+    "result_type": "street",
+    "distance": 610.9764172871222,
+    "formatted": "چوارباخ, Salim Street, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "چوارباخ",
+    "address_line2": "Salim Street, Sulaymaniyah, 46001, Iraq",
+    "timezone": {
+     "name": "Asia/Baghdad",
+     "offset_STD": "+03:00",
+     "offset_DST": "+03:00",
+     "offset_STD_seconds": 10800,
+     "offset_DST_seconds": 10800
+    },
+    "plus_code": "8H77HC4H+VH",
+    "rank": {
+     "importance": 0.05339128786144805,
+     "popularity": 2.761692430565329,
+     "confidence": 1,
+     "confidence_street_level": 1,
+     "match_type": "full_match"
+    },
+    "place_id": "51b94780e4e7b6464059ff3adcb353c74140f00102f9012fdb663100000000c0020492030c53616c696d20537472656574"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.4289518,
+     35.5572419
+    ]
+   },
+   "bbox": [
+    45.4272318,
+    35.5568801,
+    45.4306893,
+    35.5576874
+   ]
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright"
+    },
+    "name": "Salim Street",
+    "other_names": {
+     "name": "شەقامی سالم",
+     "name:ckb": "شەقامی سالم"
+    },
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "district": "Sulaymaniyah District",
+    "neighbourhood": "شۆڕش ١٠١",
+    "suburb": "عەلی ناجی",
+    "street": "Salim Street",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.4252477,
+    "lat": 35.5584131,
+    "result_type": "street",
+    "distance": 782.7751679042725,
+    "formatted": "عەلی ناجی, Salim Street, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "عەلی ناجی",
+    "address_line2": "Salim Street, Sulaymaniyah, 46001, Iraq",
+    "timezone": {
+     "name": "Asia/Baghdad",
+     "offset_STD": "+03:00",
+     "offset_DST": "+03:00",
+     "offset_STD_seconds": 10800,
+     "offset_DST_seconds": 10800
+    },
+    "plus_code": "8H77HC5G+93",
+    "rank": {
+     "importance": 0.05339128786144805,
+     "popularity": 2.6757791097850627,
+     "confidence": 1,
+     "confidence_street_level": 1,
+     "match_type": "full_match"
+    },
+    "place_id": "51801942846eb6464059391499147ac74140f00102f9018013021300000000c0020492030c53616c696d20537472656574"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.4252477,
+     35.5584131
+    ]
+   },
+   "bbox": [
+    45.4236598,
+    35.5580381,
+    45.42683,
+    35.5587555
+   ]
+  }
+ ],
+ "query": {
+  "text": "Salim Street",
+  "parsed": {
+   "street": "salim street",
+   "expected_type": "unknown"
+  }
+ }
+}

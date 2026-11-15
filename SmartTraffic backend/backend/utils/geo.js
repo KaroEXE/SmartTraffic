@@ -5,7 +5,7 @@
  * the order the API returns and MongoDB stores. Distances are metres.
  *
  * Ported from the web navigation page (frontend/navigation/geo.js and
- * routeRanking.js), which works in Leaflet's [lat, lng] order; the
+ * routeRanking.js), which works in [lat, lng] order; the
  * algorithms and thresholds are the same.
  */
 
@@ -78,94 +78,6 @@ function bearingDegrees(a, b) {
   return ((Math.atan2(y, x) / rad(1)) + 360) % 360;
 }
 
-/** Points along a line about every `step` metres (always includes the ends). */
-function samplePolyline(line, step = 25) {
-  if (!line || line.length === 0) return [];
-  const out = [{ ...toPoint(line[0]), along: 0 }];
-  let along = 0;
-  let next = step;
-  for (let i = 1; i < line.length; i += 1) {
-    const a = toPoint(line[i - 1]);
-    const b = toPoint(line[i]);
-    const seg = distanceMeters(a, b);
-    while (seg > 0 && next <= along + seg) {
-      const t = (next - along) / seg;
-      out.push({ lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t, along: next });
-      next += step;
-    }
-    along += seg;
-  }
-  const last = toPoint(line[line.length - 1]);
-  if (along - out[out.length - 1].along > 1) out.push({ ...last, along });
-  return out;
-}
-
-/** Share (0-1) of line `a`'s length that runs within `toleranceM` of line `b`. */
-function overlapRatio(a, b, toleranceM = 30) {
-  const samples = samplePolyline(a, 25);
-  if (!samples.length) return 0;
-  const near = samples.filter((p) => distanceToLineMeters(p, b) <= toleranceM).length;
-  return near / samples.length;
-}
-
-/**
- * True when the line doubles back on itself: it returns within `nearM` of a
- * point it passed at least `gapM` earlier (an out-and-back spur to a via
- * point). Such a route is not a real alternative.
- */
-function hasBacktrack(line, { nearM = 15, gapM = 200 } = {}) {
-  const s = samplePolyline(line, 20);
-  for (let i = 0; i < s.length; i += 1) {
-    for (let j = i + 1; j < s.length; j += 1) {
-      if (s[j].along - s[i].along < gapM) continue;
-      if (distanceMeters(s[i], s[j]) <= nearM) return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Via points for extra route alternatives: beside the straight
- * start-destination line, nearest first. The router turns each into a
- * road-following route.
- */
-function viaCandidates(start, destination) {
-  const d = distanceMeters(start, destination);
-  const kx = 111320 * Math.cos(rad(start.lat));
-  const ky = 110540;
-  const dx = (destination.lng - start.lng) * kx;
-  const dy = (destination.lat - start.lat) * ky;
-  const len = Math.hypot(dx, dy) || 1;
-  const nx = -dy / len; // unit normal (metres)
-  const ny = dx / len;
-  const at = (t, offset) => ({
-    lat: start.lat + (dy * t + ny * offset * d) / ky,
-    lng: start.lng + (dx * t + nx * offset * d) / kx,
-  });
-  return [
-    at(0.5, 0.2), at(0.5, -0.2),
-    at(0.5, 0.35), at(0.5, -0.35),
-    at(0.35, 0.3), at(0.65, -0.3),
-    at(0.65, 0.3), at(0.35, -0.3),
-    at(0.5, 0.5), at(0.5, -0.5),
-    at(0.25, 0.15), at(0.75, -0.15),
-  ];
-}
-
-/**
- * A candidate is a usable extra route when it follows different roads from
- * every route already found, does not double back, and is not an absurd
- * detour compared with the fastest route. Routes: { geometry, duration }.
- */
-function isUsefulAlternative(candidate, existing, { maxOverlap = 0.8, maxDetourFactor = 2.5 } = {}) {
-  const line = candidate.geometry.coordinates;
-  if (hasBacktrack(line)) return false;
-  const fastest = Math.min(...existing.map((r) => r.duration));
-  if (Number.isFinite(fastest) && candidate.duration > fastest * maxDetourFactor) return false;
-  return existing.every((r) => overlapRatio(line, r.geometry.coordinates) < maxOverlap
-    && overlapRatio(r.geometry.coordinates, line) < maxOverlap);
-}
-
 // --------------------------------------------------------------- bounding boxes
 
 /** Bounding box { south, west, north, east } of several lines, or null. */
@@ -231,11 +143,6 @@ module.exports = {
   locateOnLine,
   distanceToLineMeters,
   bearingDegrees,
-  samplePolyline,
-  overlapRatio,
-  hasBacktrack,
-  viaCandidates,
-  isUsefulAlternative,
   bboxOfLines,
   padBBoxMeters,
   bboxContainsPoint,

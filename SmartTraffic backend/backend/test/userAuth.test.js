@@ -37,7 +37,7 @@ function fakeUserModel() {
 
 const NO_PROVIDERS = 'http://127.0.0.1:9';
 const start = (opts = {}) => startApi({
-  providers: NO_PROVIDERS, isConnected: () => true, models: { User: opts.User || fakeUserModel() }, ...opts,
+  providers: NO_PROVIDERS, isConnected: () => true, models: { User: opts.User || fakeUserModel(), SavedPlace: { deleteMany: async () => ({}) } }, ...opts,
 });
 const account = { email: 'Driver@Example.com ', password: 'Secret123', name: 'Sara' };
 

@@ -141,9 +141,8 @@ function estimateRoute(route, views, cfg) {
   let live = false;
   let updatedAt = null;
   for (const ix of views) {
+    // An intersection with no surveyed position cannot be placed on a road: it is never matched to a route.
     if (!isValidLatLng(ix)) continue;
-    // An unsurveyed position would attach the delay to the wrong road.
-    if (ix.positionSource === 'placeholder' && !cfg.includePlaceholderPositions) continue;
     const { distanceMeters: d, alongMeters } = locateOnLine(ix, line);
     if (d > cfg.routeMatchMeters) continue;
     const entry = {

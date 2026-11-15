@@ -4,7 +4,7 @@ const {
 } = require('../utils/navValidation');
 const { invalid, sendError } = require('../utils/apiError');
 const {
-  FEATURE_KINDS, OSM_FEATURE_KINDS, REPORT_TYPES, PLACE_CATEGORIES, LIMITS,
+  FEATURE_KINDS, REPORT_TYPES, PLACE_CATEGORIES, LIMITS,
 } = require('../models/navigationConstants');
 
 /**
@@ -17,9 +17,19 @@ const {
  * { ok: false, code, error, details? } (utils/apiError.js).
  */
 
-const OSM_ATTRIBUTION = {
-  text: '© OpenStreetMap contributors',
+// Search, places and routing come from Geoapify, whose free plan requires "Powered by Geoapify"
+// and the OpenStreetMap attribution wherever those results are shown.
+const ATTRIBUTION = {
+  text: '© OpenStreetMap contributors. Powered by Geoapify',
   url: 'https://www.openstreetmap.org/copyright',
+  provider: 'Geoapify',
+  providerUrl: 'https://www.geoapify.com/',
+};
+// The map: OpenFreeMap's terms ask for this; MapLibre adds it by itself from the style.
+const MAP_ATTRIBUTION = {
+  text: 'OpenFreeMap © OpenMapTiles Data from OpenStreetMap',
+  url: 'https://openfreemap.org',
+  provider: 'OpenFreeMap',
 };
 
 function unwrap(parsed) {
@@ -28,7 +38,7 @@ function unwrap(parsed) {
 }
 
 function createNavigationController({
-  config, deviceTokens, geocoding, overpass, routing, routePlanner, liveTraffic, roadFeatures, roadReports, now = Date.now,
+  config, deviceTokens, places, routing, routePlanner, liveTraffic, roadFeatures, roadReports, providers, now = Date.now,
 }) {
   const nav = config.navigation;
 
@@ -58,10 +68,11 @@ function createNavigationController({
         apiVersion: '1',
         serverTime: new Date(now()).toISOString(),
         features: {
-          placeSearch: { available: geocoding.enabled, provider: geocoding.enabled ? 'nominatim-compatible' : null },
-          placesNearby: { available: overpass.enabled, categories: Object.keys(PLACE_CATEGORIES) },
+          map: { provider: 'openfreemap', ...nav.map },
+          placeSearch: { available: places.enabled, provider: places.enabled ? 'geoapify' : null },
+          placesNearby: { available: places.enabled, categories: Object.keys(PLACE_CATEGORIES) },
           routing: {
-            available: routing.enabled, provider: routing.enabled ? 'osrm' : null, profile: nav.routing.profile, maxRoutes: nav.routing.maxRoutes,
+            available: routing.enabled, provider: routing.status().provider, profile: 'driving', maxRoutes: nav.routing.maxRoutes,
           },
           liveTraffic: {
             available: true,
@@ -72,8 +83,8 @@ function createNavigationController({
           },
           roadFeatures: {
             kinds: FEATURE_KINDS,
-            osm: { available: overpass.enabled, kinds: OSM_FEATURE_KINDS },
             operator: { available: dbReady },
+            osm: { available: false, kinds: [] }, // OpenStreetMap features were retired; kept so older apps do not break
           },
           reports: {
             available: dbReady,
@@ -91,7 +102,10 @@ function createNavigationController({
           reportDescriptionMaxLength: LIMITS.reportDescriptionLength,
           rateLimits: nav.rateLimits,
         },
-        attribution: [{ ...OSM_ATTRIBUTION, requiredFor: ['placeSearch', 'placesNearby', 'routing', 'roadFeatures'] }],
+        attribution: [
+          { ...MAP_ATTRIBUTION, requiredFor: ['map'] },
+          { ...ATTRIBUTION, requiredFor: ['placeSearch', 'placesNearby', 'routing'] },
+        ],
       });
     },
 
@@ -124,11 +138,11 @@ function createNavigationController({
     async searchPlaces(req, res) {
       const { q, near, limit } = unwrap(validateSearchQuery(req.query));
       const lang = unwrap(parseLanguage(req));
-      const result = await geocoding.search({
+      const result = await places.search({
         q, near, limit, lang,
       });
       res.json({
-        ok: true, query: q, scope: result.scope, count: result.places.length, places: result.places, cached: result.cached, attribution: OSM_ATTRIBUTION,
+        ok: true, query: q, scope: result.scope, count: result.places.length, places: result.places, cached: result.cached, attribution: ATTRIBUTION,
       });
     },
 
@@ -136,16 +150,17 @@ function createNavigationController({
     async reversePlace(req, res) {
       const point = unwrap(parseQueryPoint(req.query));
       const lang = unwrap(parseLanguage(req));
-      const result = await geocoding.reverse({ ...point, lang });
+      const result = await places.reverse({ ...point, lang });
       res.json({
-        ok: true, place: result.place, cached: result.cached, attribution: OSM_ATTRIBUTION,
+        ok: true, place: result.place, cached: result.cached, attribution: ATTRIBUTION,
       });
     },
 
     /** GET /api/v1/places/nearby?lat=&lng=&category=&radius=&limit= */
     async nearbyPlaces(req, res) {
       const query = unwrap(validateNearbyQuery(req.query));
-      const result = await overpass.nearbyPlaces(query);
+      const lang = unwrap(parseLanguage(req));
+      const result = await places.nearby({ ...query, lang });
       res.json({
         ok: true,
         category: query.category,
@@ -154,7 +169,7 @@ function createNavigationController({
         count: result.places.length,
         places: result.places,
         cached: result.cached,
-        attribution: OSM_ATTRIBUTION,
+        attribution: ATTRIBUTION,
       });
     },
 
@@ -163,7 +178,7 @@ function createNavigationController({
       if (!req.is('application/json')) return sendError(res, 415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type must be application/json');
       const input = unwrap(validateRouteRequest(req.body, { maxRoutes: nav.routing.maxRoutes }));
       const plan = await routePlanner.plan(input);
-      return res.json({ ok: true, ...plan, attribution: OSM_ATTRIBUTION });
+      return res.json({ ok: true, ...plan, attribution: ATTRIBUTION });
     },
 
     /** GET /api/v1/traffic[?south=&west=&north=&east=] */
@@ -174,12 +189,24 @@ function createNavigationController({
       res.json({ ok: true, ...list, count: list.intersections.length });
     },
 
-    /** Health block for GET /api/health. */
+    /** Health block for GET /api/health: no budget, error text or key type (those are in the admin overview). */
+    publicHealth() {
+      const g = providers.geoapify.status();
+      return {
+        geoapify: { enabled: g.enabled, circuit: g.circuit },
+        routing: { enabled: routing.enabled },
+        places: { enabled: places.enabled },
+        database: roadReports.available() ? 'connected' : 'unavailable',
+      };
+    },
+
+    /** Full health for the admin overview (GET /api/v1/admin/overview). */
     health() {
       return {
+        geoapify: providers.geoapify.status(),
+        osrm: providers.osrm.status(),
         routing: routing.status(),
-        geocoding: geocoding.status(),
-        overpass: overpass.status(),
+        places: places.status(),
         database: roadReports.available() ? 'connected' : 'unavailable',
         deviceTokens: deviceTokens.ephemeral ? 'ephemeral-secret' : 'configured',
         adminEndpoints: nav.adminToken ? 'enabled' : 'disabled',
@@ -188,4 +215,4 @@ function createNavigationController({
   };
 }
 
-module.exports = { createNavigationController, OSM_ATTRIBUTION };
+module.exports = { createNavigationController, ATTRIBUTION, MAP_ATTRIBUTION };

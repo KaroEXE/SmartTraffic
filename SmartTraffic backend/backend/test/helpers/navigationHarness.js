@@ -1,10 +1,10 @@
 // Test harness for the mobile navigation API (/api/v1).
 //
-// startFakeProviders(): ONE local HTTP server that answers like OSRM
-// (/osrm), Nominatim (/nominatim) and Overpass (/overpass). The backend
-// reaches it over real HTTP with the real provider clients. Its answers are
-// MOCKED fixtures around a test intersection, not real map data; the real
-// services are exercised by scripts/smokeNavigation.js.
+// startFakeProviders(): ONE local HTTP server that answers like Geoapify (search, reverse,
+// places, routing) and, under /osrm, like a self-hosted OSRM. Search, reverse and places
+// answers are REAL Geoapify responses captured to test/fixtures/geoapify; the routes are
+// built in Geoapify's format around a test intersection. The real service is exercised
+// by scripts/smokeNavigation.js with a real key.
 //
 // startApi(): the real router, controllers, services and validation, with
 // a real decision engine (fed test observations) on an ephemeral port.
@@ -28,29 +28,55 @@ const DESTINATION = latLng(0, -800);
 
 const INTERSECTIONS = [
   { id: 'main', name: 'Main Street', lat: IX.lat, lng: IX.lng, positionSource: 'surveyed', grid: { col: 0, row: 0 } },
-  { id: 'north-gate', name: 'North Gate', ...latLng(0, 400), positionSource: 'placeholder', grid: { col: 1, row: 0 } },
+  { id: 'north-gate', name: 'North Gate', lat: null, lng: null, positionSource: 'unknown', grid: { col: 1, row: 0 } },
 ];
 
 // ------------------------------------------------------------------- providers
 
-const step = (type, location, name = 'Test Road', extra = {}) => ({
-  distance: 100, duration: 10, name, mode: 'driving', maneuver: { type, location, bearing_after: 180, ...extra },
-});
-const osrmRoute = (points, duration, distance) => ({
-  distance,
-  duration,
-  geometry: { type: 'LineString', coordinates: points.map(([x, y]) => at(x, y)) },
-  legs: [{
-    summary: 'Test Road',
-    steps: [step('depart', at(...points[0])), step('turn', at(...points[1]), 'Cross Street', { modifier: 'left' }), step('arrive', at(...points[points.length - 1]))],
-  }],
-});
+const fs = require('fs');
+const path = require('path');
+
+const fixture = (name) => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'geoapify', name), 'utf8'));
+
+// A route in Geoapify's format (GeoJSON feature, MultiLineString [lng, lat], legs with steps), around the test intersection.
+const geoRoute = (points, time, distance, nudge = 0) => {
+  const line = points.map(([x, y]) => at(x + nudge, y));
+  const last = line.length - 1;
+  const step = (from, to, text, type) => ({
+    from_index: from, to_index: to, distance: Math.round(distance / (line.length - 1)), time: Math.round(time / (line.length - 1)), instruction: { text, type },
+  });
+  return {
+    type: 'Feature',
+    properties: {
+      mode: 'drive',
+      waypoints: [{ location: line[0], original_index: 0 }, { location: line[last], original_index: 1 }],
+      units: 'metric',
+      distance,
+      distance_units: 'meters',
+      time,
+      legs: [{
+        distance,
+        time,
+        steps: [
+          step(0, 1, 'Drive south.', 'StartAtLeft'),
+          step(1, last, 'Turn left onto Cross Street.', 'Left'),
+          { ...step(last, last, 'Your destination is on the left.', 'DestinationReachedLeft'), distance: 0, time: 0 },
+        ],
+      }],
+    },
+    geometry: { type: 'MultiLineString', coordinates: [line] },
+  };
+};
 // Through the intersection southbound (enters from the north approach).
-const THROUGH = osrmRoute([[0, 800], [0, 0], [0, -800]], 600, 1600);
+const THROUGH = geoRoute([[0, 800], [0, 0], [0, -800]], 600, 1600);
 // A bypass to the east, nowhere near the intersection.
-const BYPASS = osrmRoute([[0, 800], [600, 400], [600, -400], [0, -800]], 640, 2100);
-// Through a via point to the west (the extra alternative).
-const VIA_WEST = osrmRoute([[0, 800], [-700, 0], [0, -800]], 900, 2200);
+const BYPASS = geoRoute([[0, 800], [600, 400], [600, -400], [0, -800]], 640, 2100);
+// The same road as THROUGH, a few metres aside: a copy, not an alternative.
+const COPY = geoRoute([[0, 800], [0, 0], [0, -800]], 605, 1600, 0.00001);
+
+const TEST_KEY = 'test-geoapify-key-0123456789';
+const emptyCollection = { type: 'FeatureCollection', features: [] };
+const geoError = (status, message) => ({ statusCode: status, error: status === 401 ? 'Unauthorized' : 'Bad Request', message });
 
 function startFakeProviders() {
   const calls = [];
@@ -60,66 +86,67 @@ function startFakeProviders() {
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
       calls.push({
-        method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), body, userAgent: req.headers['user-agent'],
+        method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), body, userAgent: req.headers['user-agent'], apiKey: req.headers['x-api-key'],
       });
-      const send = (status, value) => {
-        res.writeHead(status, { 'Content-Type': typeof value === 'string' ? 'text/html' : 'application/json' });
+      const send = (status, value, headers = {}) => {
+        res.writeHead(status, { 'Content-Type': typeof value === 'string' ? 'text/html' : 'application/json', ...headers });
         res.end(typeof value === 'string' ? value : JSON.stringify(value));
       };
 
-      // ---- OSRM
-      const route = /^\/osrm\/route\/v1\/driving\/(.+)$/.exec(url.pathname);
-      if (route) {
-        const points = decodeURIComponent(route[1]).split(';').map((p) => p.split(',').map(Number));
-        const startLat = points[0][1];
-        if (startLat === 10) return send(400, { code: 'NoSegment', message: 'Could not find a matching segment' });
-        if (startLat === 11) return send(400, { code: 'NoRoute', message: 'Impossible route' });
-        if (startLat === 12) return send(500, '<html>Internal error</html>');
-        if (startLat === 13) return undefined; // never answers: timeout
-        if (points.length === 3) return send(200, { code: 'Ok', routes: [VIA_WEST], waypoints: [{}, {}, {}] });
-        return send(200, { code: 'Ok', routes: [THROUGH, BYPASS], waypoints: [{ distance: 5 }, { distance: 450 }] });
-      }
-      if (/^\/osrm\/nearest\/v1\/driving\//.test(url.pathname)) {
-        return send(200, { code: 'Ok', waypoints: [{ name: '', location: at(-650, 0) }, { name: 'West Road', location: at(-700, 0) }] });
-      }
-
-      // ---- Nominatim
-      if (url.pathname === '/nominatim/search') {
-        const q = url.searchParams.get('q');
-        if (q === 'nothing here' || (q === 'far away' && url.searchParams.get('bounded') === '1')) return send(200, []);
-        return send(200, [{
-          osm_type: 'node', osm_id: 42, lat: String(IX.lat), lon: String(IX.lng), name: `${q} result`, display_name: `${q} result, Main Street, Test City`,
-          category: 'amenity', type: 'hospital', address: { road: 'Main Street', city: 'Test City', country_code: 'tc' },
-        }]);
-      }
-      if (url.pathname === '/nominatim/reverse') {
-        if (url.searchParams.get('lat').startsWith('1.')) return send(200, { error: 'Unable to geocode' });
-        return send(200, {
-          osm_type: 'way', osm_id: 7, lat: url.searchParams.get('lat'), lon: url.searchParams.get('lon'), name: '', display_name: 'Main Street, Test City', category: 'highway', type: 'primary',
+      // ---- a self-hosted OSRM (no key)
+      const osrm = /^\/osrm\/route\/v1\/driving\/(.+)$/.exec(url.pathname);
+      if (osrm) {
+        const points = decodeURIComponent(osrm[1]).split(';').map((p) => p.split(',').map(Number));
+        if (points[0][1] === 10) return send(400, { code: 'NoSegment', message: 'no segment' });
+        const route = (feature) => ({
+          distance: feature.properties.distance,
+          duration: feature.properties.time,
+          geometry: { type: 'LineString', coordinates: feature.geometry.coordinates[0] },
+          legs: [{ summary: 'Test Road', steps: [] }],
         });
+        const routes = url.searchParams.get('alternatives') === 'false' ? [route(THROUGH)] : [route(THROUGH), route(BYPASS)];
+        return send(200, { code: 'Ok', routes, waypoints: [{ location: points[0], distance: 5 }, { location: [points[1][0], points[1][1] + 450 * M_LAT], distance: 450 }] });
       }
 
-      // ---- Overpass
-      if (url.pathname === '/overpass-down') return send(503, '<html>busy</html>');
-      if (url.pathname === '/overpass') {
-        const query = new URLSearchParams(body).get('data') || '';
-        if (query.includes('around:')) {
+      // ---- Geoapify: the key goes in the x-api-key header; a key in the URL would leak into logs
+      if (url.searchParams.has('apiKey')) return send(400, geoError(400, 'the key must not be in the URL'));
+      if (req.headers['x-api-key'] !== TEST_KEY) return send(401, geoError(401, 'Invalid apiKey'));
+
+      if (url.pathname === '/v1/routing') {
+        const [start] = (url.searchParams.get('waypoints') || '').split('|').map((p) => p.split(',').map(Number));
+        if (!start || Number.isNaN(start[0])) return send(400, geoError(400, '"waypoints[0]" does not match any of the allowed types'));
+        if (start[0] === 10) return send(400, geoError(400, 'No suitable edges near location. Please check waypoint coordinate order (lat/lon).'));
+        if (start[0] === 11) return send(400, geoError(400, 'Route not found'));
+        if (start[0] === 12) return send(500, '<html>Internal error</html>');
+        if (start[0] === 13) return undefined; // never answers: timeout
+        if (start[0] === 14) return send(429, geoError(429, 'Too many requests'), { 'Retry-After': '2' });
+        if (start[0] === 15) return send(401, geoError(401, 'Invalid apiKey'));
+        const feature = { balanced: THROUGH, short: BYPASS, less_maneuvers: COPY }[url.searchParams.get('type') || 'balanced'];
+        return send(200, { type: 'FeatureCollection', features: [feature], properties: { mode: 'drive' } });
+      }
+      if (url.pathname === '/v1/geocode/search') {
+        const q = url.searchParams.get('text');
+        if (!q) return send(400, geoError(400, 'text is required'));
+        if (q === 'nothing here') return send(200, emptyCollection);
+        const answer = fixture(q === 'Salim Street' ? 'search-street.json' : 'search-hospital.json');
+        return send(200, { ...answer, features: [...answer.features, { type: 'Feature', properties: { name: 'no position' } }] });
+      }
+      if (url.pathname === '/v1/geocode/reverse') {
+        if (url.searchParams.get('lat').startsWith('1.')) return send(200, emptyCollection);
+        return send(200, fixture('reverse.json'));
+      }
+      if (url.pathname === '/v2/places') {
+        const categories = url.searchParams.get('categories');
+        if (categories === 'service.vehicle.fuel') return send(200, fixture('places-fuel.json'));
+        if (categories === 'catering.cafe') {
           return send(200, {
-            elements: [
-              { type: 'node', id: 2, lat: IX.lat + 900 * M_LAT, lon: IX.lng, tags: { amenity: 'fuel', name: 'Far Fuel' } },
-              { type: 'node', id: 1, lat: IX.lat + 100 * M_LAT, lon: IX.lng, tags: { amenity: 'fuel', brand: 'Near Fuel', opening_hours: '24/7' } },
-              { type: 'node', id: 3, lat: IX.lat + 0.1, lon: IX.lng, tags: { amenity: 'fuel', name: 'Outside radius' } },
-            ],
+            type: 'FeatureCollection',
+            features: [{ type: 'Feature', properties: { name: 'A Cafe', lat: IX.lat, lon: IX.lng, distance: 150, place_id: 'cafe1', categories: ['catering', 'catering.cafe'], name_international: { ar: 'مقهى', en: 'A Cafe' } } }],
           });
         }
-        return send(200, {
-          elements: [
-            { type: 'node', id: 100, lat: IX.lat, lon: IX.lng + 100 * M_LNG, tags: { highway: 'speed_camera', maxspeed: '60' } },
-            { type: 'way', id: 200, center: { lat: IX.lat + 200 * M_LAT, lon: IX.lng }, tags: { traffic_calming: 'bump' } },
-          ],
-        });
+        return send(200, emptyCollection);
       }
-      return send(404, { error: 'unknown fake provider path' });
+      return send(404, geoError(404, 'unknown fake provider path'));
     });
   });
   return new Promise((resolve) => {
@@ -143,19 +170,13 @@ function testConfig(providers, overrides = {}) {
     ...nav,
     adminToken: ADMIN_TOKEN,
     deviceTokenSecret: 'test-device-secret-0123456789abcdefghij',
-    userAgent: 'SmartTraffic-Navigation/test (tests@example.invalid)',
-    contactEmail: 'tests@example.invalid',
+    userAgent: 'SmartTraffic-Navigation/test',
     providerMaxWaitMs: 8000,
-    routing: {
-      ...nav.routing, url: `${providers}/osrm`, minIntervalMs: 0, timeoutMs: 500, viaAttempts: 2, alternativesBudgetMs: 3000,
+    geoapify: {
+      ...nav.geoapify, baseUrl: providers, apiKey: TEST_KEY, minIntervalMs: 0, timeoutMs: 500,
     },
-    geocoding: {
-      ...nav.geocoding, url: `${providers}/nominatim`, minIntervalMs: 0, timeoutMs: 500, apiKey: '', countryCodes: '',
-    },
-    overpass: {
-      ...nav.overpass, urls: [`${providers}/overpass-down`, `${providers}/overpass`], minIntervalMs: 0, timeoutMs: 500,
-    },
-    traffic: { ...nav.traffic, includePlaceholderPositions: false },
+    routing: { ...nav.routing, osrmUrl: '', timeoutMs: 500 },
+    traffic: { ...nav.traffic },
     rateLimits: {
       perMinute: 10_000, searchPerMinute: 10_000, routesPerMinute: 10_000, placesPerMinute: 10_000,
       deviceRegistrationsPerHour: 10_000, reportsPerHour: 10_000, votesPerHour: 10_000,
@@ -239,6 +260,6 @@ function ingestHeavyNorth(engine) {
 }
 
 module.exports = {
-  ADMIN_TOKEN, IX, M_LAT, M_LNG, at, latLng, START, DESTINATION, INTERSECTIONS,
+  ADMIN_TOKEN, TEST_KEY, fixture, IX, M_LAT, M_LNG, at, latLng, START, DESTINATION, INTERSECTIONS,
   startFakeProviders, startApi, testConfig, ingestHeavyNorth,
 };

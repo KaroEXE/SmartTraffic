@@ -71,6 +71,36 @@ function createRoadFeatureService({ RoadFeature = defaultRoadFeature, isConnecte
       return { features: inside.slice(0, limit), truncated: docs.length > limit };
     },
 
+    /** Operator listing, active or not, newest first. Resolves { features, total, page, limit }. */
+    async list({ kind, active, page = 1, limit = 25 } = {}) {
+      requireDb();
+      const filter = {};
+      if (kind) filter.kind = kind;
+      if (active !== undefined) filter.active = active;
+      const [docs, total] = await Promise.all([
+        Model.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+        Model.countDocuments(filter),
+      ]);
+      return {
+        features: docs.map(toPublic), total, page, limit,
+      };
+    },
+
+    /** Operator statistics: { total, active, byKind }. */
+    async counts() {
+      requireDb();
+      const rows = await Model.aggregate([{ $group: { _id: { kind: '$kind', active: '$active' }, n: { $sum: 1 } } }]);
+      const byKind = {};
+      let total = 0;
+      let active = 0;
+      for (const r of rows) {
+        byKind[r._id.kind] = (byKind[r._id.kind] || 0) + r.n;
+        total += r.n;
+        if (r._id.active) active += r.n;
+      }
+      return { total, active, byKind };
+    },
+
     async get(id) {
       requireDb();
       return toPublic(await load(id));

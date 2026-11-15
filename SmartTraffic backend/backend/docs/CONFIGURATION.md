@@ -8,7 +8,7 @@ and replaced by its default.
 
 **Secrets** (never commit, never log, never send to a client):
 `MONGODB_URI`, `TRAFFIC_INGEST_TOKEN`, `STREAM_ADMIN_TOKEN`,
-`NAV_ADMIN_TOKEN`, `DEVICE_TOKEN_SECRET`, `GEOCODING_API_KEY`. Generate
+`NAV_ADMIN_TOKEN`, `DEVICE_TOKEN_SECRET`, `USER_TOKEN_SECRET`, `GEOAPIFY_API_KEY`. The map needs no key (OpenFreeMap), so nothing secret is ever sent to a browser or an app. Generate
 tokens and secrets with:
 
 ```bash
@@ -20,7 +20,8 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `3000` (`.env.example`: 5500) | HTTP port |
-| `CORS_ORIGIN` | `*` | Allowed browser origin(s) for REST and Socket.IO. Native apps are not affected by CORS. |
+| `NODE_ENV` | unset | `production` enables the production start checks (see [DEPLOYMENT.md](DEPLOYMENT.md#production-start-checks)) and locks the simulation write endpoints (403). |
+| `CORS_ORIGIN` | none (localhost origins in development) | Comma-separated exact origins allowed to call the API and Socket.IO from a browser, e.g. `https://app.example.com,https://admin.example.com`. `*` allows every website (not recommended). Requests without an `Origin` header (same-origin pages, native apps, curl) are not affected. A webview app needs its own origin here (e.g. `capacitor://localhost`). |
 | `TRUST_PROXY` | off | Express [trust proxy](https://expressjs.com/en/guide/behind-proxies.html): `1` (one proxy hop, e.g. Render), `true`, a hop count or an address list. **Set it behind a proxy**, otherwise every client has the proxy's IP and they all share one rate limit. |
 
 ## Database
@@ -37,7 +38,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 | `TRAFFIC_INGEST_TOKEN` | unset | Bearer token the Python AI service sends on `POST /api/traffic` and stream reads. Unset = open (development only; a warning is logged). |
 | `STREAM_ADMIN_TOKEN` | unset | Bearer token for camera stream management. Unset = management disabled (503). |
 | `AI_STREAM_URL` | unset | Public base URL of the AI service (dashboard Live AI tab). Sent to browsers: no credentials. |
-| `INTERSECTION_LAT`, `INTERSECTION_LNG` | placeholder | Surveyed position of intersection `main`. **Needed for live traffic on routes**: placeholder positions are not matched to routes (see `NAV_ROUTE_INCLUDE_PLACEHOLDERS`). |
+| `INTERSECTION_LAT`, `INTERSECTION_LNG` | unset | Surveyed position of intersection `main`. Unset = the position is unknown (`lat`/`lng` null): the intersection is not drawn on maps and never matched to driver routes. |
 | `INTERSECTION_NAME` | `Main Street` | Display name of `main` |
 
 The other intersections and their positions are in `config/intersections.js`.
@@ -76,35 +77,34 @@ Emergency corridor: `EMERGENCY_CORRIDOR_LENGTH` (3),
 | `DEVICE_TOKEN_TTL_DAYS` | `30` | Device token lifetime (minimum 1 hour) |
 | `USER_TOKEN_SECRET` | unset | HMAC-SHA256 key for user tokens (`/auth/signup`, `/auth/login`); 32+ random characters, different from `DEVICE_TOKEN_SECRET`. Unset: a per-process key (logged warning): users are signed out at each restart. **Required in production.** Changing it signs every user out. |
 | `USER_TOKEN_TTL_DAYS` | `7` | User token lifetime (minimum 1 hour); the user signs in again afterwards |
-| `NAV_ADMIN_TOKEN` | unset | Bearer token for `POST/PATCH/DELETE /api/v1/road-features` and `PATCH /api/v1/reports/{id}`. Unset: those answer `503 FEATURE_DISABLED`. Operator tools only, never in the app. |
+| `NAV_ADMIN_TOKEN` | unset | Bearer token of the admin console (`/admin.html`) and all operator endpoints: `/api/v1/admin/*`, `POST/PATCH/DELETE /api/v1/road-features`, `PATCH /api/v1/reports/{id}`. **16+ characters: a shorter value disables administration.** Unset: those answer `503 FEATURE_DISABLED`. Never in an app. |
 
-### Providers
+### Map, search and routing (OpenFreeMap, Geoapify, optional OSRM)
 
-Blank = the public OpenStreetMap service (fine for development; about one
-request per second **for the whole server**, no SLA: use self-hosted or
-commercial instances in production, see [DEPLOYMENT.md](DEPLOYMENT.md#external-providers)).
-`off` = provider disabled (its endpoints answer `503 FEATURE_DISABLED`).
+Three separate jobs, three separate services, all behind the Hawr API:
+
+| Job | Service | Key | Where it is called from |
+|---|---|---|---|
+| Map (vector tiles, labels) | **OpenFreeMap**, drawn with MapLibre GL | none | the browser or the app, directly. The style URL and the map area come from `GET /api/client-config`. |
+| Place search, reverse geocoding, nearby places | **Geoapify** | `GEOAPIFY_API_KEY` | the Hawr backend only |
+| Routing | **Geoapify** (default) or **your own OSRM** (`ROUTING_OSRM_URL`) | same key, or none | the Hawr backend only |
+
+OpenFreeMap serves tiles only: it has no search, no routing and no traffic, and Hawr never asks it for any.
+Create the Geoapify key at <https://myprojects.geoapify.com>; the API is documented at
+<https://apidocs.geoapify.com>. See [SETUP_GUIDE.md](SETUP_GUIDE.md#geoapify) for the key restrictions to set.
 
 | Variable | Default | Description |
 |---|---|---|
-| `ROUTING_URL` | `https://router.project-osrm.org` | OSRM HTTP API base URL |
-| `ROUTING_PROFILE` | `driving` | OSRM profile in the URL path |
-| `ROUTING_TIMEOUT_MS` | `15000` | Per request |
-| `ROUTING_VIA_ATTEMPTS` | `4` | When OSRM returns fewer routes than asked, try this many via points for extra alternatives (2 requests each). `0` = OSRM's own alternatives only (faster on the public server). |
-| `ROUTING_ALTERNATIVES_BUDGET_MS` | `6000` | Time limit for that search |
-| `ROUTING_CACHE_TTL_SECONDS` | `300` | Routes per start/destination are reused for this long (traffic is always recomputed) |
-| `GEOCODING_URL` | `https://nominatim.openstreetmap.org` | Nominatim-compatible API base URL (`/search`, `/reverse`) |
-| `GEOCODING_API_KEY` | unset | Sent as `?key=` (e.g. LocationIQ). Secret. |
-| `GEOCODING_COUNTRY_CODES` | unset | Limit results to these ISO countries, e.g. `iq` |
-| `GEOCODING_TIMEOUT_MS` | `10000` | Per request |
-| `GEOCODING_CACHE_TTL_SECONDS` | `86400` | Search / reverse answers are cached this long |
-| `OVERPASS_URLS` | `https://overpass-api.de/api/interpreter,https://overpass.private.coffee/api/interpreter` | Comma-separated Overpass instances, tried in order |
-| `OVERPASS_TIMEOUT_MS` | `12000` | **Total** time for one lookup, shared between the instances tried |
-| `OVERPASS_CACHE_TTL_SECONDS` | `3600` | OSM road-feature tiles (nearby places: at most 10 min) |
-| `ROUTING_MIN_INTERVAL_MS`, `GEOCODING_MIN_INTERVAL_MS`, `OVERPASS_MIN_INTERVAL_MS` | `1100` for the public hosts, else `0` | Minimum spacing between request starts to that provider |
-| `PROVIDER_MAX_WAIT_MS` | `8000` | A request that would queue longer for its turn is refused (`503 PROVIDER_BUSY`) |
-| `PROVIDER_COOLDOWN_SECONDS` | `30` | Circuit breaker: after 3 consecutive faults (timeouts, 5xx, 429) OSRM / the geocoder are not called for this long; a failing Overpass instance is skipped after 1 fault. Requests then fail at once with `503 PROVIDER_BUSY` + `Retry-After`. |
-| `PROVIDER_CONTACT_EMAIL` | unset | Added to the `User-Agent` (`SmartTraffic-Navigation/<version> (<email>)`) and Nominatim's `email=`, as the OSM usage policies ask. Set an operations address when using the public services. |
+| `GEOAPIFY_API_KEY` | unset | Server only, sent in the `x-api-key` header and never in a URL, a log or an answer. Without it place search, reverse geocoding and nearby places answer `503 FEATURE_DISABLED` (routing too, unless `ROUTING_OSRM_URL` is set). Everything else keeps working. |
+| `GEOAPIFY_DAILY_REQUEST_LIMIT` | `2500` | Credits this server may spend per UTC day (0 = no limit). Cached answers cost nothing. Over the limit: `503 PROVIDER_QUOTA_EXCEEDED` with `Retry-After` (seconds to 00:00 UTC). The free plan is 3,000 credits a day. A search costs 1 credit; a route search costs 1 credit per route type, 3 in all. |
+| `ROUTING_OSRM_URL` | unset | Your own OSRM server (for example `http://127.0.0.1:5000`). Set: routes come from it (real alternatives, no credits) and Geoapify is used for search only. Unset: routes come from Geoapify. There is no default: no public OSRM server may be used. |
+| `OPENFREEMAP_STYLE_URL` | `https://tiles.openfreemap.org/styles/liberty` | The MapLibre style apps load. Other OpenFreeMap styles: `bright`, `positron`. Served by `GET /api/client-config`. |
+| `ROUTING_CACHE_TTL_SECONDS` | `300` | Routes per start/destination are reused for this long (traffic is always recomputed). |
+| `PLACES_CACHE_TTL_SECONDS` | `86400` | Search, reverse and nearby answers are cached this long. |
+| `PROVIDER_MAX_WAIT_MS` | `8000` | A request that would queue longer for its turn (Geoapify allows 5 requests per second on the free plan; starts are spaced 220 ms) is refused (`503 PROVIDER_BUSY`). |
+| `PROVIDER_COOLDOWN_SECONDS` | `30` | Circuit breaker: after 3 consecutive faults (timeouts, 5xx, rate limiting) the provider is not called for this long; requests fail at once with `503 PROVIDER_BUSY` and `Retry-After`. A used-up quota or a key problem does not trip it. |
+
+Fixed in code: request timeout 15 s, one shared client for routing and places. The map area (Kurdistan Region) and zoom range 7-19 are in `config.navigation.map`.
 
 ### Live traffic
 
@@ -115,7 +115,6 @@ commercial instances in production, see [DEPLOYMENT.md](DEPLOYMENT.md#external-p
 | `NAV_SECONDS_PER_VEHICLE` | `2` | Delay estimate per approach = mean wait + vehicles × this |
 | `NAV_LONG_QUEUE_VEHICLES` | `10` | `long_queue` route alert at this many queued vehicles |
 | `NAV_MODERATE_DELAY_SECONDS`, `NAV_HEAVY_DELAY_SECONDS` | `30`, `90` | `level` thresholds (`light` / `moderate` / `heavy`) |
-| `NAV_ROUTE_INCLUDE_PLACEHOLDERS` | `false` | `true` = also match intersections whose position is a placeholder (demos only: the delay may be attached to the wrong road) |
 
 ### Community reports
 
@@ -142,9 +141,9 @@ In-memory, per backend instance. Per client IP unless noted.
 | Variable | Default |
 |---|---|
 | `RATE_LIMIT_PER_MINUTE` | `120` (all `/api/v1`) |
-| `RATE_LIMIT_SEARCH_PER_MINUTE` | `30` (search + reverse) |
-| `RATE_LIMIT_PLACES_PER_MINUTE` | `20` (nearby) |
-| `RATE_LIMIT_ROUTES_PER_MINUTE` | `20` |
+| `RATE_LIMIT_SEARCH_PER_MINUTE` | `15` (search + reverse; each call costs provider quota) |
+| `RATE_LIMIT_PLACES_PER_MINUTE` | `10` (nearby) |
+| `RATE_LIMIT_ROUTES_PER_MINUTE` | `10` |
 | `RATE_LIMIT_DEVICE_REGISTRATIONS_PER_HOUR` | `10` |
 | `RATE_LIMIT_REPORTS_PER_HOUR` | `10` per device |
 | `RATE_LIMIT_VOTES_PER_HOUR` | `60` per device |

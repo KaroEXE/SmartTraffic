@@ -55,7 +55,7 @@ test('improvements and positions are formatted honestly', async () => {
   assert.equal(formatImprovement(-4), '−4.0%');
   assert.equal(formatImprovement(null), 'n/a');
   assert.equal(formatImprovement(0), '0.0%');
-  assert.equal(positionLabel({ positionSource: 'placeholder' }), 'Approximate position - not surveyed');
+  assert.equal(positionLabel({ positionSource: 'unknown' }), 'Position not surveyed - not shown on the map');
   assert.equal(positionLabel({ positionSource: 'surveyed' }), null);
   assert.equal(positionLabel({ dataMode: 'simulation' }), 'Simulated position');
 });

@@ -1,20 +1,21 @@
 #!/usr/bin/env node
 /**
- * End-to-end smoke test of the mobile navigation API against a RUNNING
- * backend and whatever providers it is configured with (by default the
- * public OSRM / Nominatim / Overpass services - about ten requests, within
- * their usage policies).
+ * End-to-end smoke test of the navigation API against a RUNNING backend,
+ * with its real Geoapify key: about ten Geoapify requests (search, reverse,
+ * nearby, three route types), which count against the daily credit budget. Run
+ * it after changing the key, the provider settings or the provider code.
  *
  *   node scripts/smokeNavigation.js [baseUrl] [--write]
  *
  *   baseUrl   default http://localhost:$PORT (PORT from backend/.env, else 3000)
- *   --write   also create, vote on and withdraw a community report, and
- *             (with SMOKE_ADMIN_TOKEN = the server's NAV_ADMIN_TOKEN) create
+ *   --write   also sign up, log in and delete a throw-away account, create, vote
+ *             on and withdraw a community report, and (with SMOKE_ADMIN_TOKEN =
+ *             the server's NAV_ADMIN_TOKEN) read the admin overview and create
  *             and delete an operator road feature. Needs MongoDB. Everything
  *             written is withdrawn / deleted again.
  *
  * Points (lat,lng): SMOKE_START, SMOKE_DESTINATION; default two points in
- * the city of the configured intersections. Exit code 1 if any check fails.
+ * Sulaymaniyah (any two points on roads in Iraq work). Exit code 1 if any check fails.
  */
 const path = require('path');
 
@@ -66,7 +67,19 @@ function expect(r, status) {
   await check('GET /config', async () => {
     config = expect(await call('GET', '/api/v1/config'), 200);
     const f = config.features;
-    return `routing=${f.routing.available} search=${f.placeSearch.available} osm=${f.roadFeatures.osm.available} reports=${f.reports.available}`;
+    if (!f.routing.available || !f.placeSearch.available) throw new Error('routing or search is not configured: set GEOAPIFY_API_KEY');
+    return `routing=${f.routing.available} search=${f.placeSearch.available} reports=${f.reports.available}; attribution "${config.attribution[0].text}"`;
+  });
+
+  await check('GET /api/client-config (map style, public values only)', async () => {
+    const r = expect(await call('GET', '/api/client-config'), 200);
+    if (r.map.provider !== 'openfreemap' || !/^https:\/\//.test(r.map.styleUrl)) throw new Error('no map style URL');
+    const key = (process.env.GEOAPIFY_API_KEY || '').trim();
+    if (key && JSON.stringify(r).includes(key)) throw new Error('A SERVER KEY IS EXPOSED');
+    // The style itself must be reachable: it is what draws the map.
+    const style = await fetch(r.map.styleUrl);
+    if (!style.ok) throw new Error(`the map style answered HTTP ${style.status}`);
+    return `style on ${new URL(r.map.styleUrl).host}, area ${r.map.bounds.south},${r.map.bounds.west} to ${r.map.bounds.north},${r.map.bounds.east}`;
   });
 
   await check('GET /places/search', async () => {
@@ -107,7 +120,7 @@ function expect(r, status) {
     const d = 0.02;
     const q = `south=${START.lat - d}&west=${START.lng - d}&north=${START.lat + d}&east=${START.lng + d}`;
     const r = expect(await call('GET', `/api/v1/road-features?${q}`), 200);
-    return `${r.count} features; sources ${JSON.stringify(r.sources)}`;
+    return `${r.count} operator features`;
   });
 
   await check('GET /traffic', async () => {
@@ -120,6 +133,18 @@ function expect(r, status) {
     let tokenA = null;
     let tokenB = null;
     let reportId = null;
+    await check('auth: signup, login, me, wrong password, delete', async () => {
+      const email = `smoke_${Date.now()}@example.invalid`;
+      const password = 'Smoke-Test-Pass-9';
+      const signup = expect(await call('POST', '/api/v1/auth/signup', { body: { email, password } }), 201);
+      expect(await call('POST', '/api/v1/auth/login', { body: { email, password: 'wrong-Password-1' } }), 401);
+      const login = expect(await call('POST', '/api/v1/auth/login', { body: { email, password } }), 200);
+      const me = expect(await call('GET', '/api/v1/auth/me', { token: login.token }), 200);
+      if (me.user.email !== email || JSON.stringify(me).includes('passwordHash')) throw new Error('unexpected /auth/me answer');
+      expect(await call('GET', '/api/v1/auth/me'), 401);
+      expect(await call('DELETE', '/api/v1/auth/me', { token: login.token, body: { password } }), 200);
+      return `account ${signup.user.id} created and deleted`;
+    });
     await check('POST /auth/device (x2)', async () => {
       tokenA = expect(await call('POST', '/api/v1/auth/device', { body: { platform: 'other', appVersion: 'smoke' } }), 201).token;
       tokenB = expect(await call('POST', '/api/v1/auth/device', { body: { platform: 'other', appVersion: 'smoke' } }), 201).token;
@@ -146,7 +171,35 @@ function expect(r, status) {
       if (r.status === 403) return 'merged into someone else\'s report: not withdrawn';
       return `status ${expect(r, 200).report.status}`;
     });
+    await check('saved places: create, list, delete (own account)', async () => {
+      const email = `smoke_saved_${Date.now()}@example.invalid`;
+      const password = 'Smoke-Test-Pass-9';
+      const signup = expect(await call('POST', '/api/v1/auth/signup', { body: { email, password } }), 201);
+      const created = expect(await call('POST', '/api/v1/saved-places', { token: signup.token, body: { label: 'Smoke home', kind: 'home', ...START } }), 201);
+      const list = expect(await call('GET', '/api/v1/saved-places', { token: signup.token }), 200);
+      if (!list.savedPlaces.some((p) => p.id === created.savedPlace.id)) throw new Error('the saved place is not listed');
+      expect(await call('GET', '/api/v1/saved-places'), 401);
+      expect(await call('DELETE', `/api/v1/saved-places/${created.savedPlace.id}`, { token: signup.token }), 200);
+      expect(await call('DELETE', '/api/v1/auth/me', { token: signup.token, body: { password } }), 200);
+      return 'saved, listed, deleted; account removed';
+    });
     if (adminToken) {
+      await check('admin: local place create, find in search, delete', async () => {
+        const created = expect(await call('POST', '/api/v1/places/local', { token: adminToken, body: { name: 'Smoke test clinic', category: 'hospital', ...DESTINATION } }), 201);
+        try {
+          const found = expect(await call('GET', '/api/v1/places/search?q=Smoke%20test%20clinic'), 200);
+          if (!found.places.some((p) => p.id === `hawr:${created.place.id}`)) throw new Error('the place is not found by search');
+        } finally {
+          expect(await call('DELETE', `/api/v1/places/local/${created.place.id}`, { token: adminToken }), 200);
+        }
+        return `created, found by search, deleted ${created.place.id}`;
+      });
+    }
+    if (adminToken) {
+      await check('admin: overview', async () => {
+        const o = expect(await call('GET', '/api/v1/admin/overview', { token: adminToken }), 200);
+        return `geoapify ${o.system.geoapify.enabled ? 'enabled' : 'DISABLED'}, routing ${o.system.routing.provider || 'OFF'}, ${o.users.available ? `${o.users.total} users` : 'no database'}`;
+      });
       await check('admin: road feature create / delete', async () => {
         const created = expect(await call('POST', '/api/v1/road-features', { token: adminToken, body: { kind: 'roadworks', ...DESTINATION, name: 'Smoke test' } }), 201);
         expect(await call('DELETE', `/api/v1/road-features/${created.feature.id}`, { token: adminToken }), 200);

@@ -13,15 +13,6 @@ function num(name, fallback) {
   return value;
 }
 
-function adminToken() {
-  const raw = (process.env.ADMIN_TOKEN || '').trim();
-  if (raw && raw.length < 16) {
-    console.warn('[config] ADMIN_TOKEN is shorter than 16 characters - road report review is disabled');
-    return '';
-  }
-  return raw;
-}
-
 function httpUrl(name) {
   const raw = (process.env[name] || '').trim();
   if (!raw) return '';
@@ -59,30 +50,35 @@ function flag(name, fallback) {
 }
 
 /**
- * External navigation provider URL: blank = the public default, "off" =
- * provider disabled (its endpoints answer 503). Returned without a trailing
- * slash; null when disabled or invalid.
+ * The operator token (NAV_ADMIN_TOKEN) opens the admin console and the road
+ * feature, report and user tools: a short one can be guessed, so it is refused
+ * (administration stays disabled) instead of used.
  */
-function providerUrl(name, fallback) {
+function operatorToken(name) {
   const raw = (process.env[name] || '').trim();
-  if (raw.toLowerCase() === 'off') return null;
-  if (!raw) return fallback;
-  const value = httpUrl(name);
-  return value ? value.replace(/\/+$/, '') : null;
+  if (raw && raw.length < 16) {
+    console.warn(`[config] ${name} is shorter than 16 characters - administration is DISABLED. Use a long random value: node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`);
+    return '';
+  }
+  return raw;
 }
 
-/** Hosts whose usage policy allows about one request per second. */
-const PUBLIC_PROVIDER_HOSTS = new Set([
-  'router.project-osrm.org', 'nominatim.openstreetmap.org',
-  'overpass-api.de', 'overpass.private.coffee', 'overpass.kumi.systems',
-]);
-const isPublicProvider = (url) => {
-  try { return PUBLIC_PROVIDER_HOSTS.has(new URL(url).hostname); } catch { return false; }
-};
-/** Minimum spacing between upstream requests: explicit, else 1.1 s for public hosts, 0 for self-hosted. */
-function providerInterval(name, urls) {
-  const list = [].concat(urls).filter(Boolean);
-  return Math.max(0, num(name, list.some(isPublicProvider) ? 1100 : 0));
+/**
+ * Allowed browser origins (CORS and Socket.IO), as plain data; utils/cors.js
+ * turns it into the check. CORS_ORIGIN is a comma-separated list of exact
+ * origins, or "*" for any origin (only for a public API without cookies).
+ * Blank: any localhost origin outside production, none in production.
+ * Requests without an Origin header (same-origin pages, native apps, curl)
+ * are not affected.
+ */
+function corsSettings(raw, production) {
+  const value = (raw || '').trim();
+  if (value === '*') {
+    if (production) console.warn('[config] CORS_ORIGIN=* allows every website to call this API from a browser; list your own origins instead');
+    return { any: true, origins: [], allowLocalhost: false };
+  }
+  const origins = value.split(',').map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean);
+  return { any: false, origins, allowLocalhost: !origins.length && !production };
 }
 
 /** Express "trust proxy": blank = off, true/false, a hop count, or an address list. */
@@ -90,23 +86,17 @@ function trustProxy(raw) {
   const value = (raw || '').trim();
   if (!value || value.toLowerCase() === 'false') return false;
   if (value.toLowerCase() === 'true') return true;
-  if (/^\d+$/.test(value)) return Number(value);
+  if (/^d+$/.test(value)) return Number(value);
   return value;
 }
 
 const PACKAGE_VERSION = require('../package.json').version;
-const routingUrl = providerUrl('ROUTING_URL', 'https://router.project-osrm.org');
-const geocodingUrl = providerUrl('GEOCODING_URL', 'https://nominatim.openstreetmap.org');
-const overpassUrls = (process.env.OVERPASS_URLS || '').trim().toLowerCase() === 'off'
-  ? []
-  : ((process.env.OVERPASS_URLS || '').trim()
-    ? process.env.OVERPASS_URLS.split(',').map((u) => u.trim()).filter((u) => /^https?:\/\//i.test(u)).map((u) => u.replace(/\/+$/, ''))
-    : ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter']);
-const contactEmail = (process.env.PROVIDER_CONTACT_EMAIL || '').trim();
+const PRODUCTION = (process.env.NODE_ENV || '').trim().toLowerCase() === 'production';
 
 const config = {
   port: num('PORT', 3000),
-  corsOrigin: process.env.CORS_ORIGIN || '*',
+  production: PRODUCTION,
+  cors: corsSettings(process.env.CORS_ORIGIN, PRODUCTION),
   // Historical data store. Never log this value: it may contain credentials.
   mongodbUri: (process.env.MONGODB_URI || '').trim(),
   // Python/Flask AI service whose four camera streams the Live AI page shows,
@@ -120,13 +110,6 @@ const config = {
   // Bearer token for camera stream management (POST/PATCH/DELETE
   // /api/streams). Empty = stream management is disabled. Never log it.
   streamAdminToken: (process.env.STREAM_ADMIN_TOKEN || '').trim(),
-  // Secret for the road-report review page (admin.html). Empty = reviewing
-  // is disabled and nothing drivers report is ever published. Never log it.
-  adminToken: adminToken(),
-  // Driver road reports of the web navigation map (pending, approved,
-  // rejected). Plain JSON file so it works without MongoDB.
-  hazardReportsFile: (process.env.HAZARD_REPORTS_FILE || '').trim()
-    || path.join(__dirname, '..', 'data', 'hazard-reports.json'),
   // History sampling: at most one stored traffic record per intersection per
   // this many seconds of capture time (0 = store every observation). Changes
   // in emergency, pedestrians or stream attribution are always stored.
@@ -189,7 +172,7 @@ const config = {
   navigation: {
     // Bearer token for road-feature management and report moderation.
     // Empty = those endpoints are disabled (503). Never log it, never ship it in an app.
-    adminToken: (process.env.NAV_ADMIN_TOKEN || '').trim(),
+    adminToken: operatorToken('NAV_ADMIN_TOKEN'),
     // HMAC secret that signs device tokens (>= 32 characters). Empty = a
     // per-process secret: tokens stop working at every restart. Never log it.
     deviceTokenSecret: (process.env.DEVICE_TOKEN_SECRET || '').trim(),
@@ -199,47 +182,50 @@ const config = {
     // secret: users are signed out at every restart. Never log it.
     userTokenSecret: (process.env.USER_TOKEN_SECRET || '').trim(),
     userTokenTtlSeconds: Math.max(3600, num('USER_TOKEN_TTL_DAYS', 7) * 86400),
-    // Identifies this backend to the OSM services, as their usage policies require.
-    userAgent: `SmartTraffic-Navigation/${PACKAGE_VERSION}${contactEmail ? ` (${contactEmail})` : ''}`,
-    contactEmail,
+    userAgent: `SmartTraffic-Navigation/${PACKAGE_VERSION}`,
     // Upstream requests queued longer than this are refused (503 PROVIDER_BUSY) instead of waiting.
     providerMaxWaitMs: Math.max(0, num('PROVIDER_MAX_WAIT_MS', 8000)),
     // A provider that keeps failing (timeouts, 5xx) is not called for this long:
     // requests fail at once with 503 PROVIDER_BUSY + Retry-After instead of hanging.
     providerCooldownMs: Math.max(0, num('PROVIDER_COOLDOWN_SECONDS', 30)) * 1000,
 
+    // Search, reverse geocoding, nearby places and (unless ROUTING_OSRM_URL is set) routing:
+    // Geoapify (https://apidocs.geoapify.com). The key stays on this server and is sent in a request header.
+    geoapify: {
+      baseUrl: 'https://api.geoapify.com',
+      apiKey: (process.env.GEOAPIFY_API_KEY || '').trim(),
+      // The free plan allows 5 requests per second: starts are spaced just above that.
+      minIntervalMs: 220,
+      timeoutMs: 15000,
+      // Credits this server may spend per UTC day (0 = no limit). The free plan is 3,000 credits a day:
+      // the default leaves a margin. Cached answers cost nothing.
+      dailyLimit: Math.max(0, Math.round(num('GEOAPIFY_DAILY_REQUEST_LIMIT', 2500))),
+    },
+
+    // The map, for the web and the mobile app: OpenFreeMap vector tiles, rendered by MapLibre. No key,
+    // no registration, no request limit (openfreemap.org/tos). It offers no search, routing or traffic.
+    // The apps are fixed to the Kurdistan Region and to the zoom range that is useful there.
+    map: {
+      provider: 'openfreemap',
+      styleUrl: (httpUrl('OPENFREEMAP_STYLE_URL') || 'https://tiles.openfreemap.org/styles/liberty').replace(/\/+$/, ''),
+      bounds: {
+        south: 34.4, west: 42.3, north: 37.4, east: 46.4,
+      },
+      minZoom: 7,
+      maxZoom: 19,
+    },
+
     routing: {
-      url: routingUrl, // OSRM HTTP API; null = routing disabled
-      profile: (process.env.ROUTING_PROFILE || 'driving').trim(),
-      minIntervalMs: providerInterval('ROUTING_MIN_INTERVAL_MS', routingUrl),
-      timeoutMs: Math.max(1000, num('ROUTING_TIMEOUT_MS', 15000)),
+      // A self-hosted OSRM (no default: there is no public server we may use). Unset = Geoapify.
+      osrmUrl: (httpUrl('ROUTING_OSRM_URL') || '').replace(/\/+$/, ''),
+      timeoutMs: 15000,
       maxRoutes: 4,
-      // Extra alternatives through via points when OSRM returns fewer than asked
-      // (each attempt = 2 upstream requests), within the time budget.
-      viaAttempts: Math.max(0, Math.round(num('ROUTING_VIA_ATTEMPTS', 4))),
-      alternativesBudgetMs: Math.max(0, num('ROUTING_ALTERNATIVES_BUDGET_MS', 6000)),
       cacheTtlSeconds: Math.max(0, num('ROUTING_CACHE_TTL_SECONDS', 300)),
       snapWarningMeters: 300,
     },
 
-    geocoding: {
-      url: geocodingUrl, // Nominatim-compatible API; null = place search disabled
-      apiKey: (process.env.GEOCODING_API_KEY || '').trim(), // sent as ?key= (e.g. LocationIQ); never log it
-      countryCodes: (process.env.GEOCODING_COUNTRY_CODES || '').trim().toLowerCase(),
-      minIntervalMs: providerInterval('GEOCODING_MIN_INTERVAL_MS', geocodingUrl),
-      timeoutMs: Math.max(1000, num('GEOCODING_TIMEOUT_MS', 10000)),
-      cacheTtlSeconds: Math.max(0, num('GEOCODING_CACHE_TTL_SECONDS', 86400)),
-      localSpanDeg: 0.3, // search near the user first, in a box at least this wide (~33 km)
-    },
-
-    overpass: {
-      urls: overpassUrls, // tried in order; [] = OSM road features and nearby places disabled
-      minIntervalMs: providerInterval('OVERPASS_MIN_INTERVAL_MS', overpassUrls),
-      // Total time for one lookup, shared between the instances tried.
-      timeoutMs: Math.max(1000, num('OVERPASS_TIMEOUT_MS', 12000)),
-      cacheTtlSeconds: Math.max(0, num('OVERPASS_CACHE_TTL_SECONDS', 3600)),
-      tileDeg: 0.05, // road features are cached in tiles of this size (~5.5 km)
-      maxElements: 2000,
+    places: {
+      cacheTtlSeconds: Math.max(0, num('PLACES_CACHE_TTL_SECONDS', 86400)),
     },
 
     traffic: {
@@ -253,9 +239,6 @@ const config = {
       // Congestion level thresholds on the estimated delay of an approach.
       moderateDelaySeconds: Math.max(0, num('NAV_MODERATE_DELAY_SECONDS', 30)),
       heavyDelaySeconds: Math.max(0, num('NAV_HEAVY_DELAY_SECONDS', 90)),
-      // Placeholder (unsurveyed) intersection positions are not matched to routes
-      // unless this is true: a delay would be attached to the wrong road.
-      includePlaceholderPositions: flag('NAV_ROUTE_INCLUDE_PLACEHOLDERS', false),
     },
 
     reports: {
@@ -283,9 +266,10 @@ const config = {
     // Per client IP unless noted. Counters are in memory (one backend instance).
     rateLimits: {
       perMinute: Math.max(1, num('RATE_LIMIT_PER_MINUTE', 120)),
-      searchPerMinute: Math.max(1, num('RATE_LIMIT_SEARCH_PER_MINUTE', 30)),
-      routesPerMinute: Math.max(1, num('RATE_LIMIT_ROUTES_PER_MINUTE', 20)),
-      placesPerMinute: Math.max(1, num('RATE_LIMIT_PLACES_PER_MINUTE', 20)),
+      // Search, routes and nearby places each cost provider quota: keep these low.
+      searchPerMinute: Math.max(1, num('RATE_LIMIT_SEARCH_PER_MINUTE', 15)),
+      routesPerMinute: Math.max(1, num('RATE_LIMIT_ROUTES_PER_MINUTE', 10)),
+      placesPerMinute: Math.max(1, num('RATE_LIMIT_PLACES_PER_MINUTE', 10)),
       deviceRegistrationsPerHour: Math.max(1, num('RATE_LIMIT_DEVICE_REGISTRATIONS_PER_HOUR', 10)),
       reportsPerHour: Math.max(1, num('RATE_LIMIT_REPORTS_PER_HOUR', 10)), // per device
       votesPerHour: Math.max(1, num('RATE_LIMIT_VOTES_PER_HOUR', 60)), // per device

@@ -1,42 +1,24 @@
 const crypto = require('crypto');
 const { TtlCache } = require('../../utils/ttlCache');
-const {
-  requestJson, createThrottle, createCircuitBreaker, UpstreamError,
-} = require('../../utils/upstream');
-const { viaCandidates, isUsefulAlternative } = require('../../utils/geo');
 const { ApiError } = require('../../utils/apiError');
+const { UpstreamError } = require('../../utils/upstream');
+const { distanceMeters } = require('../../utils/geo');
 
 /**
- * Road routes from an OSRM HTTP API (ROUTING_URL; default the public OSRM
- * demo server, which has no SLA and allows about one request per second -
- * self-host OSRM for production, see docs/DEPLOYMENT.md).
+ * Road routes, normalised into one Route shape whatever the provider:
+ *   { id, geometry: GeoJSON LineString [lng, lat], distance (m), duration (s), summary, steps?: [Step] }
  *
- * route({ start, destination, maxRoutes, steps }) resolves
- *   { routes: [Route], snapWarnings: [string], cached }
- *   Route: { id, geometry: GeoJSON LineString, distance (m), duration (s),
- *            summary, steps?: [Step] }
+ * Providers (chosen by configuration, the apps never know):
+ *   - your own OSRM (ROUTING_OSRM_URL): best route plus alternatives in one request;
+ *   - Geoapify (GEOAPIFY_API_KEY): `GET /v1/routing` once per route type (balanced, short,
+ *     less_maneuvers). Geoapify has no alternatives parameter; those types give real, different
+ *     routes, and a route that copies another is dropped. Times are free-flow: no provider traffic.
+ *     Geoapify gives no street names, so `summary` is empty and `name` is null.
  *
- * Routes come from one OSRM request with alternatives. When OSRM returns
- * fewer than `maxRoutes`, more are looked for through via points beside the
- * direct line (ROUTING_VIA_ATTEMPTS, within ROUTING_ALTERNATIVES_BUDGET_MS);
- * a candidate is kept only when it runs on different roads, does not double
- * back and is at most 2.5x the fastest time (utils/geo.isUsefulAlternative).
- * The same method as the web navigation page (frontend/navigation/routeService.js).
- *
- * Results are cached (ROUTING_CACHE_TTL_SECONDS) by rounded coordinates, so
- * an app refreshing its ETAs re-ranks cached routes with fresh live traffic
- * (routePlanner.js) without new OSRM requests. Route ids are derived from
- * the geometry: the same road path keeps the same id across requests.
+ * Results are cached (ROUTING_CACHE_TTL_SECONDS) by rounded coordinates, so an app refreshing its
+ * ETAs re-ranks cached routes with fresh live traffic (routePlanner.js) without new provider
+ * requests. Route ids are derived from the geometry: the same road path keeps the same id.
  */
-
-const PROVIDER = 'Routing provider';
-
-const OSRM_ERRORS = {
-  NoRoute: [422, 'NO_ROUTE', 'No drivable route was found between these points'],
-  NoSegment: [422, 'POINT_NOT_ROUTABLE', 'A point is too far from any road; choose a point on or near a road'],
-  InvalidValue: [400, 'INVALID_REQUEST', 'The routing provider rejected the coordinates'],
-  TooBig: [400, 'INVALID_REQUEST', 'The route request is too large for the routing provider'],
-};
 
 // ---------------------------------------------------------------- maneuvers
 
@@ -51,7 +33,7 @@ const DIRECTION_WORD = {
 };
 
 /**
- * Short English instruction for one OSRM step. A convenience for display
+ * Short English instruction for one routing step. A convenience for display
  * or text-to-speech; the structured `maneuver` is the authoritative data
  * (an app that localizes builds its own text from it).
  */
@@ -149,92 +131,144 @@ function normalizeRoute(raw) {
   };
 }
 
-function osrmError(json, status) {
-  const known = json && OSRM_ERRORS[json.code];
-  if (known) return new ApiError(known[0], known[1], known[2]);
-  return new UpstreamError('PROVIDER_ERROR', `${PROVIDER} could not plan this route (${(json && json.code) || `HTTP ${status}`})`, { provider: PROVIDER, status });
+// ------------------------------------------------------------------ Geoapify
+
+/** Geoapify instruction type ("StartAtLeft", "SlightRight", "RoundaboutEnter", ...) -> OSRM-style maneuver. */
+function geoapifyManeuver(type) {
+  const t = String(type || '');
+  const side = /Left/.test(t) ? 'left' : (/Right/.test(t) ? 'right' : null);
+  if (/^Start/.test(t)) return { type: 'depart', modifier: side };
+  if (/^Destination/.test(t)) return { type: 'arrive', modifier: side };
+  if (/Roundabout/i.test(t)) return { type: /Exit/i.test(t) ? 'exit roundabout' : 'roundabout', modifier: null };
+  if (/U-?turn/i.test(t)) return { type: 'turn', modifier: 'uturn' };
+  const strength = /Slight/.test(t) ? 'slight ' : (/Sharp/.test(t) ? 'sharp ' : '');
+  if (/Merge/i.test(t)) return { type: 'merge', modifier: side };
+  if (/Ramp/i.test(t)) return { type: 'on ramp', modifier: side };
+  if (/Exit/i.test(t)) return { type: 'off ramp', modifier: side };
+  if (/Keep|Fork/i.test(t)) return { type: 'fork', modifier: side };
+  if (/Continue|Straight|Becomes/i.test(t)) return { type: 'continue', modifier: 'straight' };
+  if (side) return { type: 'turn', modifier: `${strength}${side}` };
+  return { type: null, modifier: null };
 }
 
-function createRoutingService({
-  config, userAgent, maxWaitMs = 8000, cooldownMs = 30_000, fetchImpl = globalThis.fetch, now = Date.now, log = console,
-}) {
-  const cfg = config;
-  const enabled = Boolean(cfg.url);
-  const cache = new TtlCache({ maxEntries: 500, ttlMs: cfg.cacheTtlSeconds * 1000, now });
-  const throttle = createThrottle({ minIntervalMs: cfg.minIntervalMs, maxWaitMs, provider: PROVIDER, now });
-  const breaker = createCircuitBreaker({
-    provider: PROVIDER, failureThreshold: 3, cooldownMs, now,
-  });
-  const stats = { requests: 0, cacheHits: 0, failures: 0, lastError: null, lastErrorAt: null };
-
-  async function get(path, params) {
-    breaker.check();
-    stats.requests += 1;
-    try {
-      const answer = await throttle.schedule(() => requestJson(`${cfg.url}${path}?${new URLSearchParams(params)}`, {
-        provider: PROVIDER, timeoutMs: cfg.timeoutMs, userAgent, fetchImpl,
-      }));
-      // 4xx + JSON is a routing answer (NoRoute, NoSegment); 5xx is a failing provider.
-      if (answer.status >= 500) {
-        throw new UpstreamError('PROVIDER_ERROR', `${PROVIDER} answered HTTP ${answer.status}`, { provider: PROVIDER, status: answer.status });
-      }
-      breaker.success();
-      return answer;
-    } catch (err) {
-      breaker.failure(err);
-      stats.failures += 1;
-      stats.lastError = err.code || 'PROVIDER_ERROR';
-      stats.lastErrorAt = new Date(now()).toISOString();
-      throw err;
-    }
-  }
-
-  const coords = (points) => points.map((p) => `${p.lng},${p.lat}`).join(';');
-
-  async function osrmRoute(points, alternatives) {
-    const { status, json } = await get(`/route/v1/${cfg.profile}/${coords(points)}`, {
-      alternatives: alternatives > 0 ? String(alternatives) : 'false',
-      overview: 'full',
-      geometries: 'geojson',
-      steps: 'true', // also needed for the road-name summary
+/**
+ * One Geoapify route feature (geometry: MultiLineString [lng, lat], one line per leg) -> Route.
+ * Step indexes (from_index) point into the leg's own line, so they are shifted by where
+ * that line starts in the joined line. Geoapify gives no street names: summary is ''.
+ */
+function normalizeGeoapifyRoute(feature) {
+  const props = feature && feature.properties;
+  const geometry = feature && feature.geometry;
+  if (!props || !geometry || geometry.type !== 'MultiLineString' || !Array.isArray(geometry.coordinates)) return null;
+  const coordinates = [];
+  const lineStart = [];
+  for (const line of geometry.coordinates) {
+    if (!Array.isArray(line)) return null;
+    lineStart.push(Math.max(0, coordinates.length - (coordinates.length && line.length ? 1 : 0)));
+    line.forEach((c, i) => {
+      const last = coordinates[coordinates.length - 1];
+      if (i === 0 && last && last[0] === c[0] && last[1] === c[1]) return; // the join point is shared by two legs
+      coordinates.push(c);
     });
-    if (!json || json.code !== 'Ok') throw osrmError(json, status);
-    return json;
   }
-
-  /** Roads near a point, nearest first, one per road name; unnamed ways (service roads) skipped. */
-  async function nearbyRoads(point) {
-    const { json } = await get(`/nearest/v1/${cfg.profile}/${coords([point])}`, { number: '10' });
-    const seen = new Set();
-    const roads = [];
-    for (const w of (json && json.code === 'Ok' && Array.isArray(json.waypoints) ? json.waypoints : [])) {
-      const name = w && typeof w.name === 'string' ? w.name.trim() : '';
-      if (!name || seen.has(name) || !Array.isArray(w.location)) continue;
-      seen.add(name);
-      roads.push({ lat: w.location[1], lng: w.location[0] });
+  if (!validLine({ type: 'LineString', coordinates }) || !Number.isFinite(props.distance) || !Number.isFinite(props.time)) return null;
+  const steps = [];
+  (Array.isArray(props.legs) ? props.legs : []).forEach((leg, li) => {
+    for (const s of (leg && Array.isArray(leg.steps) ? leg.steps : [])) {
+      const instruction = s.instruction || {};
+      const m = geoapifyManeuver(instruction.type);
+      const at = coordinates[(lineStart[li] || 0) + (Number.isInteger(s.from_index) ? s.from_index : 0)];
+      steps.push({
+        distance: Math.round((Number(s.distance) || 0) * 10) / 10,
+        duration: Math.round((Number(s.time) || 0) * 10) / 10,
+        name: null,
+        ref: null,
+        mode: 'driving',
+        instruction: typeof instruction.text === 'string' && instruction.text ? instruction.text : 'Continue',
+        maneuver: {
+          type: m.type, modifier: m.modifier, location: at || null, bearingBefore: null, bearingAfter: null, exit: Number.isInteger(instruction.roundabout_exit) ? instruction.roundabout_exit : null,
+        },
+      });
     }
-    return roads;
+  });
+  return {
+    id: routeId(coordinates),
+    geometry: { type: 'LineString', coordinates },
+    distance: Math.round(props.distance * 10) / 10,
+    duration: Math.round(props.time * 10) / 10,
+    summary: '',
+    steps,
+  };
+}
+
+/** Share of a's vertices (about 11 m grid) that b also passes through. */
+function sharedShare(a, b) {
+  const key = (c) => `${c[0].toFixed(4)},${c[1].toFixed(4)}`;
+  const set = new Set(b.map(key));
+  return a.filter((c) => set.has(key(c))).length / a.length;
+}
+
+/** True when two routes follow (almost) the same road: a route that copies another is not an alternative. */
+function isSameRoad(a, b) {
+  return sharedShare(a.geometry.coordinates, b.geometry.coordinates) >= 0.9 && sharedShare(b.geometry.coordinates, a.geometry.coordinates) >= 0.9;
+}
+
+// ------------------------------------------------------------------ service
+
+// Geoapify has no alternatives parameter: the three route types are three real, different routes.
+const GEOAPIFY_ROUTE_TYPES = ['balanced', 'short', 'less_maneuvers'];
+
+function createRoutingService({
+  geoapify, osrm, config, now = Date.now, log = console,
+}) {
+  const provider = osrm.enabled ? 'osrm' : (geoapify.enabled ? 'geoapify' : null);
+  const enabled = provider !== null;
+  const cache = new TtlCache({ maxEntries: 500, ttlMs: config.cacheTtlSeconds * 1000, now });
+  const stats = { cacheHits: 0 };
+
+  const snapWarnings = (points, snapped) => points.flatMap((p, i) => {
+    const s = snapped[i];
+    if (!s || !Number.isFinite(s.lat) || !Number.isFinite(s.lng)) return [];
+    const d = distanceMeters(p, s);
+    return d > config.snapWarningMeters ? [`${i === 0 ? 'Start' : 'Destination'} is ${Math.round(d)} m from the nearest road; the route starts from that road.`] : [];
+  });
+
+  /** Own OSRM: best route plus alternatives in one request. */
+  async function viaOsrm(start, destination, maxRoutes) {
+    const json = await osrm.get(`/route/v1/driving/${start.lng},${start.lat};${destination.lng},${destination.lat}`, {
+      alternatives: maxRoutes > 1 ? String(maxRoutes - 1) : 'false', overview: 'full', geometries: 'geojson', steps: 'true',
+    });
+    if (!json || json.code !== 'Ok' || !Array.isArray(json.routes)) {
+      throw new UpstreamError('PROVIDER_ERROR', 'Routing server returned an unexpected answer', { provider: 'Routing server' });
+    }
+    const snapped = (json.waypoints || []).map((w) => (w && Array.isArray(w.location) ? { lat: w.location[1], lng: w.location[0] } : null));
+    return { routes: json.routes.map(normalizeRoute).filter(Boolean), warnings: snapWarnings([start, destination], snapped) };
   }
 
-  async function moreRoutes(start, destination, existing, wanted) {
-    const deadline = now() + cfg.alternativesBudgetMs;
-    const found = [];
-    const candidates = viaCandidates(start, destination).slice(0, cfg.viaAttempts);
-    for (const candidate of candidates) {
-      if (existing.length + found.length >= wanted || now() >= deadline) break;
-      try {
-        // The nearest named road only: one more request per attempt at most.
-        const [via] = await nearbyRoads(candidate);
-        if (!via || now() >= deadline) continue;
-        const json = await osrmRoute([start, via, destination], 0);
-        const route = normalizeRoute(json.routes && json.routes[0]);
-        if (route && isUsefulAlternative(route, [...existing, ...found])) found.push(route);
-      } catch (err) {
-        // A failed candidate is skipped, never replaced by something invented.
-        if (err.code === 'PROVIDER_BUSY') break;
+  /** Geoapify: one request per route type; the first must succeed, the others add real alternatives. */
+  async function viaGeoapify(start, destination, maxRoutes) {
+    const ask = async (type) => {
+      const json = await geoapify.get('/v1/routing', {
+        waypoints: `${start.lat},${start.lng}|${destination.lat},${destination.lng}`, mode: 'drive', type, details: 'instruction_details', lang: 'en',
+      });
+      if (!json || !Array.isArray(json.features)) throw new UpstreamError('PROVIDER_ERROR', 'Map provider returned an unexpected routing answer', { provider: 'Map provider' });
+      const feature = json.features[0];
+      const snapped = ((feature && feature.properties && feature.properties.waypoints) || []).map((w) => (w && Array.isArray(w.location) ? { lat: w.location[1], lng: w.location[0] } : null));
+      return { route: normalizeGeoapifyRoute(feature), warnings: snapWarnings([start, destination], snapped) };
+    };
+    const types = GEOAPIFY_ROUTE_TYPES.slice(0, Math.max(1, maxRoutes));
+    const first = await ask(types[0]);
+    const routes = first.route ? [first.route] : [];
+    const others = await Promise.allSettled(types.slice(1).map(ask));
+    for (const result of others) {
+      if (result.status === 'rejected') {
+        log.warn(`[navigation] an alternative route type failed: ${result.reason && result.reason.code}`);
+        continue;
       }
+      const r = result.value.route;
+      if (r && !routes.some((x) => isSameRoad(x, r))) routes.push(r);
     }
-    return found;
+    return { routes, warnings: first.warnings };
   }
 
   return {
@@ -243,35 +277,21 @@ function createRoutingService({
     async route({
       start, destination, maxRoutes, steps = false,
     }) {
-      if (!enabled) throw new ApiError(503, 'FEATURE_DISABLED', 'Routing is disabled on this server (ROUTING_URL=off)');
-      const key = [start.lat, start.lng, destination.lat, destination.lng].map((n) => n.toFixed(5)).join(',') + `|${maxRoutes}`;
+      if (!enabled) throw new ApiError(503, 'FEATURE_DISABLED', 'Routing is disabled: no routing provider is configured (GEOAPIFY_API_KEY or ROUTING_OSRM_URL)');
+      const key = [start.lat, start.lng, destination.lat, destination.lng].map((n) => n.toFixed(5)).join(',') + `|${maxRoutes}|${provider}`;
       let entry = cache.get(key);
       const cached = entry !== undefined;
       if (cached) {
         stats.cacheHits += 1;
       } else {
-        const json = await osrmRoute([start, destination], maxRoutes - 1);
+        const found = provider === 'osrm' ? await viaOsrm(start, destination, maxRoutes) : await viaGeoapify(start, destination, maxRoutes);
         const routes = [];
-        for (const raw of json.routes || []) {
-          const r = normalizeRoute(raw);
-          if (r && !routes.some((x) => x.id === r.id)) routes.push(r);
+        for (const r of found.routes) {
+          if (!routes.some((x) => x.id === r.id)) routes.push(r);
           if (routes.length >= maxRoutes) break;
         }
-        if (!routes.length) throw new ApiError(422, 'NO_ROUTE', OSRM_ERRORS.NoRoute[2]);
-        if (routes.length < maxRoutes && cfg.viaAttempts > 0) {
-          const extra = await moreRoutes(start, destination, routes, maxRoutes).catch((err) => {
-            log.warn(`[navigation] extra route alternatives failed: ${err.message}`);
-            return [];
-          });
-          routes.push(...extra);
-        }
-        const snapWarnings = [];
-        (json.waypoints || []).forEach((w, i) => {
-          if (w && Number.isFinite(w.distance) && w.distance > cfg.snapWarningMeters) {
-            snapWarnings.push(`${i === 0 ? 'Start' : 'Destination'} is ${Math.round(w.distance)} m from the nearest road; the route starts from that road.`);
-          }
-        });
-        entry = { routes, snapWarnings };
+        if (!routes.length) throw new ApiError(422, 'NO_ROUTE', 'No drivable route was found between these points');
+        entry = { routes, snapWarnings: found.warnings };
         cache.set(key, entry);
       }
       return {
@@ -283,12 +303,12 @@ function createRoutingService({
 
     status() {
       return {
-        enabled, provider: enabled ? 'osrm' : null, profile: cfg.profile, cacheEntries: cache.size, ...breaker.state(), ...stats,
+        enabled, provider, cacheEntries: cache.size, ...stats,
       };
     },
   };
 }
 
 module.exports = {
-  createRoutingService, normalizeRoute, instructionFor, routeSteps, routeId,
+  createRoutingService, normalizeRoute, normalizeGeoapifyRoute, geoapifyManeuver, isSameRoad, instructionFor, routeSteps, routeId,
 };

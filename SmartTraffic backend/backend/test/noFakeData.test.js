@@ -74,9 +74,12 @@ test('the live channel manages exactly the contract intersections, and none star
   // python/docs/RENDER_DEPLOYMENT.md (integration contract): the ids the AI service may report.
   const live = require('../config/intersections');
   assert.deepEqual(live.map((i) => i.id), ['main', 'university-road', 'market-square', 'hospital-junction', 'ring-road-north']);
-  // Unsurveyed positions are flagged, never presented as the real junction.
-  for (const i of live) assert.ok(['surveyed', 'placeholder'].includes(i.positionSource), i.id);
-  assert.ok(live.filter((i) => i.id !== 'main').every((i) => i.positionSource === 'placeholder'));
+  // A position is either surveyed or absent: nothing is invented for a junction nobody has measured.
+  for (const i of live) {
+    if (i.positionSource === 'surveyed') assert.ok(Number.isFinite(i.lat) && Number.isFinite(i.lng), `${i.id}: surveyed means real coordinates`);
+    else assert.deepEqual([i.positionSource, i.lat, i.lng], ['unknown', null, null], `${i.id}: no invented coordinates`);
+  }
+  assert.ok(live.filter((i) => i.id !== 'main').every((i) => i.positionSource === 'unknown'));
 
   // An intersection without an AI feed has no numbers: no counts, WAITING.
   const { createTrafficDecisionService } = require('../services/trafficDecisionService');

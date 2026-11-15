@@ -1,10 +1,10 @@
 /**
- * HTTP calls to external providers (OSRM, Nominatim, Overpass).
+ * HTTP calls to the external search and routing providers (Geoapify, an own OSRM).
  *
  *   requestJson(url, options)   one request with a timeout and an identifying
  *                               User-Agent -> { status, json, headers }
- *   createThrottle(options)     spaces requests to one provider, as the public
- *                               OpenStreetMap services require (about 1/s)
+ *   createThrottle(options)     spaces requests to one provider (its
+ *                               per-second limit)
  *
  * Failures become UpstreamError with a stable `code`, which the API maps to
  * an HTTP status (utils/apiError.js). Provider URLs may carry API keys, so
@@ -45,6 +45,7 @@ async function requestJson(url, {
   timeoutMs = 10_000,
   userAgent,
   fetchImpl = globalThis.fetch,
+  passRateLimit = false,
 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -64,7 +65,8 @@ async function requestJson(url, {
     throw new UpstreamError('PROVIDER_UNREACHABLE', `${provider} could not be reached`, { provider });
   }
   try {
-    if (res.status === 429) {
+    // passRateLimit: the caller reads the 429 body itself (a quota and a rate limit differ).
+    if (res.status === 429 && !passRateLimit) {
       throw new UpstreamError('PROVIDER_BUSY', `${provider} is rate limiting this server`, {
         provider, status: 429, retryAfterSeconds: retryAfter(res.headers),
       });

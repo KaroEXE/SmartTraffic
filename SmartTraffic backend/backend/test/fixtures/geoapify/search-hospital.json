@@ -1,0 +1,201 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright"
+    },
+    "name": "مستشفى سفين",
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "district": "Sulaymaniyah District",
+    "neighbourhood": "گردی جۆگە ٢٠٧",
+    "suburb": "کانی ئاسکان",
+    "street": "Qanat Street",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.4448134,
+    "lat": 35.5623836,
+    "result_type": "amenity",
+    "distance": 1080.3120778263574,
+    "formatted": "مستشفى سفين, کانی ئاسکان, Qanat Street, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "مستشفى سفين",
+    "address_line2": "کانی ئاسکان, Qanat Street, Sulaymaniyah, 46001, Iraq",
+    "category": "healthcare.clinic_or_praxis",
+    "timezone": {
+     "name": "Asia/Baghdad",
+     "offset_STD": "+03:00",
+     "offset_DST": "+03:00",
+     "offset_STD_seconds": 10800,
+     "offset_DST_seconds": 10800
+    },
+    "plus_code": "8H77HC6V+XW",
+    "rank": {
+     "importance": 0.000057954528114702334,
+     "popularity": 2.5280079293193234,
+     "confidence": 1,
+     "match_type": "full_match"
+    },
+    "place_id": "514ae93ea5efb846405943e7902ffcc74140f00103f901db4bee4102000000c00201920315d985d8b3d8aad8b4d981d98920d8b3d981d98ad986"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.4448134,
+     35.5623836
+    ]
+   },
+   "bbox": [
+    45.4447634,
+    35.5623336,
+    45.4448634,
+    35.5624336
+   ]
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright"
+    },
+    "name": "Smart Health Tower",
+    "other_names": {
+     "name": "تاوەری تەندروستی سمارت",
+     "name:ar": "مستشفى سمارت",
+     "name:fa": "بیمارستان سمارت",
+     "name:ku": "نەخۆشخانەی سمارت",
+     "name:tr": "Smart Hastane",
+     "name:aeb": "برج سمارت الصحي",
+     "name:ang": "smart hospital",
+     "name:ckb": "نەخۆشخانەی سمارت"
+    },
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "district": "Sulaymaniyah District",
+    "suburb": "کانی ئاسکان",
+    "street": "Madam Mitterrand",
+    "housenumber": "Smart Health tower hospital ",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.4430236,
+    "lat": 35.568591,
+    "result_type": "amenity",
+    "distance": 1194.0021533098948,
+    "formatted": "Smart Health Tower, Smart Health tower hospital کانی ئاسکان, Madam Mitterrand, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "Smart Health Tower",
+    "address_line2": "Smart Health tower hospital کانی ئاسکان, Madam Mitterrand, Sulaymaniyah, 46001, Iraq",
+    "category": "building.healthcare",
+    "timezone": {
+     "name": "Asia/Baghdad",
+     "offset_STD": "+03:00",
+     "offset_DST": "+03:00",
+     "offset_STD_seconds": 10800,
+     "offset_DST_seconds": 10800
+    },
+    "plus_code": "8H77HC9V+C6",
+    "rank": {
+     "importance": 0.000057954528114702334,
+     "popularity": 2.3129025290539773,
+     "confidence": 1,
+     "match_type": "full_match"
+    },
+    "place_id": "5197ad50ffb4b846405964e60297c7c84140f00102f9010bc1384100000000c00201920312536d617274204865616c746820546f776572"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.4430236,
+     35.568591
+    ]
+   },
+   "bbox": [
+    45.4428496,
+    35.5683809,
+    45.4431939,
+    35.5687871
+   ]
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright"
+    },
+    "name": "Jmury Hospital",
+    "other_names": {
+     "name": "مستشفى الجمهورى",
+     "name:ku": "نە‌خۆشخانە‌ی جموری"
+    },
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "district": "Sulaymaniyah District",
+    "suburb": "کانی ئاسکان",
+    "street": "25 Pasha Kura",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.4442876,
+    "lat": 35.5632387,
+    "result_type": "amenity",
+    "distance": 1044.1804305547005,
+    "formatted": "Jmury Hospital, کانی ئاسکان, 25 Pasha Kura, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "Jmury Hospital",
+    "address_line2": "کانی ئاسکان, 25 Pasha Kura, Sulaymaniyah, 46001, Iraq",
+    "category": "healthcare.hospital",
+    "timezone": {
+     "name": "Asia/Baghdad",
+     "offset_STD": "+03:00",
+     "offset_DST": "+03:00",
+     "offset_STD_seconds": 10800,
+     "offset_DST_seconds": 10800
+    },
+    "plus_code": "8H77HC7V+7P",
+    "rank": {
+     "importance": 0.000057954528114702334,
+     "popularity": 2.5270165433617544,
+     "confidence": 0,
+     "match_type": "full_match"
+    },
+    "place_id": "515902846adeb8464059b82baa3418c84140f00103f901970d2f3c01000000c0020192030e4a6d75727920486f73706974616c"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.4442876,
+     35.5632387
+    ]
+   },
+   "bbox": [
+    45.4442376,
+    35.5631887,
+    45.4443376,
+    35.5632887
+   ]
+  }
+ ],
+ "query": {
+  "text": "مستشفى"
+ }
+}

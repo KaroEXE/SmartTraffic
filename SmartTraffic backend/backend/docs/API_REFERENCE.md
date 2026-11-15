@@ -16,7 +16,7 @@ The mobile navigation API (`/api/v1`) is described for app developers in
 |---|---|---|---|
 | none | - | public reads, dashboard, mobile reads | - |
 | Device token | `Authorization: Bearer <jwt>` | mobile app writes (reports, votes) | issued by `POST /api/v1/auth/device`, signed with `DEVICE_TOKEN_SECRET` |
-| Navigation admin token | `Authorization: Bearer <token>` | road-feature management, report moderation | `NAV_ADMIN_TOKEN` (unset = those endpoints answer 503) |
+| Navigation admin token | `Authorization: Bearer <token>` | admin console, road-feature management, report moderation | `NAV_ADMIN_TOKEN` (16+ characters; unset or shorter = those endpoints answer 503) |
 | Ingest token | `Authorization: Bearer <token>` | Python AI service: `POST /api/traffic`, stream reads and health | `TRAFFIC_INGEST_TOKEN` (unset = open, development only) |
 | Stream admin token | `Authorization: Bearer <token>` | camera stream management | `STREAM_ADMIN_TOKEN` (unset = management answers 503) |
 
@@ -41,12 +41,17 @@ Request bodies: JSON, at most 100 KB.
 |---|---|---|---|
 | GET | `/api/v1/config` | - | Available features, limits, rate limits, attribution |
 | POST | `/api/v1/auth/device` | - / device | Issue a device token (or renew one near expiry) |
-| GET | `/api/v1/places/search` | - | Place / address search (Nominatim-compatible provider) |
+| GET | `/api/v1/places/search` | - | Place / address search: Hawr places first, then Geoapify (Iraq) |
 | GET | `/api/v1/places/reverse` | - | Address at a point |
-| GET | `/api/v1/places/nearby` | - | POIs of one category around a point (Overpass) |
-| POST | `/api/v1/routes` | - | Routes (OSRM) ranked by live-AI-adjusted time, with traffic and road alerts |
+| GET | `/api/v1/places/nearby` | - | Places of one category around a point (Geoapify) |
+| GET | `/api/v1/places/local` | - | Hawr's own places (operator-entered) in a box |
+| GET | `/api/v1/places/local/{id}` | - | One Hawr place |
+| POST | `/api/v1/places/local` | nav admin | Add a Hawr place |
+| PATCH | `/api/v1/places/local/{id}` | nav admin | Change it (partial) |
+| DELETE | `/api/v1/places/local/{id}` | nav admin | Delete it |
+| POST | `/api/v1/routes` | - | Up to three routes (Geoapify route types, or your own OSRM) ranked by live-AI-adjusted time, with traffic and road alerts |
 | GET | `/api/v1/traffic` | - | Live AI traffic per monitored intersection |
-| GET | `/api/v1/road-features` | - | Operator + OpenStreetMap road features in a box |
+| GET | `/api/v1/road-features` | - | Operator-entered road features in a box |
 | GET | `/api/v1/road-features/{id}` | - | One operator road feature |
 | POST | `/api/v1/road-features` | nav admin | Create an operator road feature |
 | PATCH | `/api/v1/road-features/{id}` | nav admin | Update it (partial) |
@@ -57,9 +62,13 @@ Request bodies: JSON, at most 100 KB.
 | POST | `/api/v1/reports/{id}/votes` | device | Confirm / dismiss |
 | DELETE | `/api/v1/reports/{id}` | device | Withdraw own report |
 | PATCH | `/api/v1/reports/{id}` | nav admin | Moderate: `status` (`active`, `removed`, `resolved`), `verification` |
+| GET | `/api/v1/saved-places` | user | The signed-in user's saved places |
+| POST | `/api/v1/saved-places` | user | Save a place (home, work, favourite); at most 100 |
+| PATCH | `/api/v1/saved-places/{id}` | user | Change one of your places |
+| DELETE | `/api/v1/saved-places/{id}` | user | Delete one of your places |
 
 Rate limits, per IP unless noted: 120/min overall; search and reverse
-30/min; nearby 20/min; routes 20/min; device registration 10/hour; report
+15/min; nearby 10/min; routes 10/min; device registration 10/hour; report
 creation 10/hour per device; votes 60/hour per device. See
 [CONFIGURATION.md](CONFIGURATION.md#rate-limits).
 
@@ -90,8 +99,13 @@ curl -X PATCH $API/reports/<id> -H "$ADMIN" -H 'Content-Type: application/json' 
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
+| GET | `/api/v1/admin/overview` | admin | System health (Geoapify budget, routing provider, database), live feed state, counts of users / reports / road features / places |
+| GET | `/api/v1/admin/users` | admin | Accounts (email, name, created), newest first, `q` = start of an email, paged |
+| GET | `/api/v1/admin/reports` | admin | Driver reports in any status, `status`, `type`, paged |
+| GET | `/api/v1/admin/road-features` | admin | Road features active or not, `kind`, `active`, paged |
+| GET | `/api/v1/admin/places` | admin | Hawr places active or not, `category`, `active`, paged |
 | GET | `/api/health` | - | Uptime, AI feed status, database status and history counters, navigation providers (`navigation`: requests, cache hits, failures, circuit state, benched Overpass instances) |
-| GET | `/api/client-config` | - | Public settings for the dashboard (`aiStreamUrl`) |
+| GET | `/api/client-config` | - | Public settings for the web pages and apps: `aiStreamUrl`, the map (`styleUrl`, `bounds`, zoom range, attribution) and the search attribution. No secret |
 | GET | `/api/docs/` | - | Swagger UI |
 | GET | `/api/openapi.json` | - | OpenAPI 3.0.3 document |
 
@@ -165,4 +179,4 @@ Server → client (same names in both rooms; `dataMode` says which):
 ## Static files
 
 `/` serves the operations dashboard (`../frontend`), `/navigation.html` the
-web driver page, `/vendor/three` and `/vendor/leaflet` the libraries they use.
+web driver page, `/vendor/three` and `/vendor/maplibre-gl` the libraries they use.

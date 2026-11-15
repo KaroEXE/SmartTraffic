@@ -3,11 +3,9 @@
  * models, validation and the OpenAPI document so they cannot drift apart.
  */
 
-// Road features: fixed things on the road. Operator-managed ones live in
-// MongoDB (RoadFeature); speed cameras and speed bumps also come from
-// OpenStreetMap (services/navigation/overpassService.js).
+// Road features: fixed things on the road (speed cameras, bumps, closures,
+// roadworks). Managed by the operator, stored in MongoDB (RoadFeature).
 const FEATURE_KINDS = ['speed_camera', 'speed_bump', 'road_closure', 'roadworks'];
-const OSM_FEATURE_KINDS = ['speed_camera', 'speed_bump'];
 
 // Community reports: temporary conditions reported by drivers (RoadReport).
 const REPORT_TYPES = ['accident', 'traffic_jam', 'road_closure', 'construction', 'hazard'];
@@ -20,26 +18,33 @@ const REPORT_VOTES = ['confirm', 'dismiss'];
 const MAX_STORED_VOTES = 200;
 
 // verified   entered or confirmed by the operator
-// community  mapped by OpenStreetMap contributors, not checked by the operator
 // unverified reported by an app user, not checked by the operator
-const VERIFICATIONS = ['verified', 'community', 'unverified'];
+const VERIFICATIONS = ['verified', 'unverified'];
 
 const PLATFORMS = ['android', 'ios', 'other'];
 
-// Nearby place categories -> OpenStreetMap tag (key=value).
+// Nearby place categories -> Geoapify Places category ids
+// (https://apidocs.geoapify.com/docs/places/#categories). A parent id includes its children.
 const PLACE_CATEGORIES = {
-  fuel: ['amenity', 'fuel'],
-  charging_station: ['amenity', 'charging_station'],
-  parking: ['amenity', 'parking'],
-  hospital: ['amenity', 'hospital'],
-  pharmacy: ['amenity', 'pharmacy'],
-  police: ['amenity', 'police'],
-  restaurant: ['amenity', 'restaurant'],
-  cafe: ['amenity', 'cafe'],
-  atm: ['amenity', 'atm'],
-  car_repair: ['shop', 'car_repair'],
-  hotel: ['tourism', 'hotel'],
+  fuel: ['service.vehicle.fuel'],
+  charging_station: ['service.vehicle.charging_station'],
+  parking: ['parking'],
+  hospital: ['healthcare.hospital'],
+  pharmacy: ['healthcare.pharmacy'],
+  police: ['service.police'],
+  restaurant: ['catering.restaurant'],
+  cafe: ['catering.cafe'],
+  atm: ['service.financial.atm', 'service.financial.bank'],
+  car_repair: ['service.vehicle.repair.car'],
+  hotel: ['accommodation.hotel'],
 };
+
+// Hawr's own important places (models/LocalPlace.js), entered by the operator.
+const LOCAL_PLACE_CATEGORIES = [
+  'hospital', 'pharmacy', 'police', 'fuel', 'parking', 'school', 'university', 'mosque', 'government', 'market', 'park', 'landmark', 'other',
+];
+// A user's saved places (models/SavedPlace.js).
+const SAVED_PLACE_KINDS = ['favorite', 'home', 'work', 'other'];
 
 const LIMITS = {
   nameLength: 120,
@@ -57,6 +62,10 @@ const LIMITS = {
   // User accounts (POST /api/v1/auth/signup).
   emailMaxLength: 254,
   userNameMaxLength: 80,
+  // Saved places per user, and their text limits.
+  maxSavedPlaces: 100,
+  savedLabelLength: 80,
+  addressLength: 200,
   passwordMinLength: 8,
   // Upper bound keeps hashing cost bounded for hostile input.
   passwordMaxLength: 128,
@@ -64,7 +73,6 @@ const LIMITS = {
 
 module.exports = {
   FEATURE_KINDS,
-  OSM_FEATURE_KINDS,
   REPORT_TYPES,
   REPORT_STATUSES,
   PUBLIC_REPORT_STATUSES,
@@ -74,5 +82,7 @@ module.exports = {
   VERIFICATIONS,
   PLATFORMS,
   PLACE_CATEGORIES,
+  LOCAL_PLACE_CATEGORIES,
+  SAVED_PLACE_KINDS,
   LIMITS,
 };

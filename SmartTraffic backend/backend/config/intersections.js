@@ -16,13 +16,13 @@
  * north, col 0 = west; neighbouring cells are joined by a road). See
  * services/networkTopology.js. The grid is a configured schematic.
  *
- * Position: `positionSource` says how reliable lat/lng are.
- *   surveyed     set from the environment (INTERSECTION_LAT / INTERSECTION_LNG
- *                for "main") - the real junction
- *   placeholder  an approximate position in the city, not surveyed. The
- *                dashboard labels these, and driver navigation (which adds
- *                live traffic only within 60 m of a junction) should not be
- *                trusted for them until they are surveyed.
+ * Position: `positionSource` says where lat/lng come from.
+ *   surveyed     the real junction: INTERSECTION_LAT / INTERSECTION_LNG for
+ *                "main", or lat/lng written here for another intersection once
+ *                it has been surveyed (then set positionSource to 'surveyed')
+ *   unknown      lat and lng are null. Nothing is invented: the intersection is
+ *                not drawn on any map and never matched to a route, but its
+ *                signal control, AI data and the simulation work as usual.
  */
 const path = require('path');
 
@@ -37,8 +37,9 @@ function coordinate(name, fallback, limit) {
   return { value: fallback, fromEnv: false };
 }
 
-const mainLat = coordinate('INTERSECTION_LAT', 35.5617, 90);
-const mainLng = coordinate('INTERSECTION_LNG', 45.4329, 180);
+const mainLat = coordinate('INTERSECTION_LAT', null, 90);
+const mainLng = coordinate('INTERSECTION_LNG', null, 180);
+const UNKNOWN = { lat: null, lng: null, positionSource: 'unknown' };
 
 module.exports = [
   {
@@ -46,19 +47,19 @@ module.exports = [
     name: (process.env.INTERSECTION_NAME || '').trim().slice(0, 80) || 'Main Street',
     lat: mainLat.value,
     lng: mainLng.value,
-    positionSource: mainLat.fromEnv && mainLng.fromEnv ? 'surveyed' : 'placeholder',
+    positionSource: mainLat.fromEnv && mainLng.fromEnv ? 'surveyed' : 'unknown',
     grid: { col: 0, row: 1 },
   },
   {
-    id: 'university-road', name: 'University Road', lat: 35.5702, lng: 45.4418, positionSource: 'placeholder', grid: { col: 2, row: 0 },
+    id: 'university-road', name: 'University Road', ...UNKNOWN, grid: { col: 2, row: 0 },
   },
   {
-    id: 'market-square', name: 'Market Square', lat: 35.5560, lng: 45.4385, positionSource: 'placeholder', grid: { col: 1, row: 1 },
+    id: 'market-square', name: 'Market Square', ...UNKNOWN, grid: { col: 1, row: 1 },
   },
   {
-    id: 'hospital-junction', name: 'Hospital Junction', lat: 35.5655, lng: 45.4232, positionSource: 'placeholder', grid: { col: 0, row: 0 },
+    id: 'hospital-junction', name: 'Hospital Junction', ...UNKNOWN, grid: { col: 0, row: 0 },
   },
   {
-    id: 'ring-road-north', name: 'Ring Road North', lat: 35.5768, lng: 45.4305, positionSource: 'placeholder', grid: { col: 1, row: 0 },
+    id: 'ring-road-north', name: 'Ring Road North', ...UNKNOWN, grid: { col: 1, row: 0 },
   },
 ];

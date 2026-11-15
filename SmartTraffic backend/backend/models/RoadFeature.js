@@ -5,8 +5,7 @@ const { FEATURE_KINDS, LIMITS } = require('./navigationConstants');
  * One operator-managed road feature: a speed camera, speed bump, road
  * closure or roadworks site. Written only through the admin endpoints of
  * the navigation API (NAV_ADMIN_TOKEN), so every record counts as verified.
- * The app reads them with GET /api/v1/road-features, merged with the
- * community-mapped OpenStreetMap features.
+ * The apps read them with GET /api/v1/road-features.
  *
  * `location` is a GeoJSON Point ([lng, lat]) with a 2dsphere index, queried
  * by map area ($geoWithin) and near routes. Closures and roadworks may be

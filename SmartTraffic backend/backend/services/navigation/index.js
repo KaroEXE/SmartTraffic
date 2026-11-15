@@ -3,11 +3,15 @@ const { createDeviceTokens } = require('../../utils/deviceToken');
 const { createUserTokens } = require('../../utils/userToken');
 const { createUserAccountService } = require('./userAccountService');
 const { createAuthController } = require('../../controllers/authController');
-const { createGeocodingService } = require('./geocodingService');
-const { createOverpassService } = require('./overpassService');
+const { createAdminController } = require('../../controllers/adminController');
+const { createGeoapifyClient, createOsrmClient } = require('./providerClient');
+const { createPlaceService } = require('./placeService');
 const { createRoutingService } = require('./routingService');
 const { createLiveTrafficService } = require('./liveTrafficService');
 const { createRoadFeatureService } = require('./roadFeatureService');
+const { createLocalPlaceService } = require('./localPlaceService');
+const { createSavedPlaceService } = require('./savedPlaceService');
+const { createPlaceDataController } = require('../../controllers/placeDataController');
 const { createRoadReportService } = require('./roadReportService');
 const { createRoutePlanner } = require('./routePlanner');
 const { createNavigationController } = require('../../controllers/navigationController');
@@ -41,10 +45,17 @@ function createNavigationApi({
   const userTokens = createUserTokens({
     secret: nav.userTokenSecret, ttlSeconds: nav.userTokenTtlSeconds, now, log,
   });
-  const userAccounts = createUserAccountService({ User: models.User, isConnected });
-  const geocoding = createGeocodingService({ config: { ...nav.geocoding, contactEmail: nav.contactEmail }, ...common });
-  const overpass = createOverpassService({ config: nav.overpass, ...common });
-  const routing = createRoutingService({ config: nav.routing, ...common, log });
+  const savedPlaces = createSavedPlaceService({ SavedPlace: models.SavedPlace, isConnected });
+  const localPlaces = createLocalPlaceService({ LocalPlace: models.LocalPlace, isConnected });
+  const userAccounts = createUserAccountService({ User: models.User, isConnected, afterDelete: (id) => savedPlaces.removeAllFor(id) });
+  const geoapify = createGeoapifyClient({ config: nav.geoapify, ...common, log });
+  const osrm = createOsrmClient({ config: nav.routing, ...common, log });
+  const places = createPlaceService({
+    client: geoapify, config: nav.places, localPlaces, now,
+  });
+  const routing = createRoutingService({
+    geoapify, osrm, config: nav.routing, now, log,
+  });
   const liveTraffic = createLiveTrafficService({ engine, config: nav.traffic, now });
   const roadFeatures = createRoadFeatureService({ RoadFeature: models.RoadFeature, isConnected, now });
   const roadReports = createRoadReportService({
@@ -55,21 +66,24 @@ function createNavigationApi({
   });
 
   const navigationController = createNavigationController({
-    config, deviceTokens, geocoding, overpass, routing, routePlanner, liveTraffic, roadFeatures, roadReports, now,
+    config, deviceTokens, places, routing, routePlanner, liveTraffic, roadFeatures, roadReports, providers: { geoapify, osrm }, now,
   });
-  const roadDataController = createRoadDataController({
-    roadFeatures, roadReports, overpass, log,
-  });
+  const roadDataController = createRoadDataController({ roadFeatures, roadReports, log });
   const authController = createAuthController({ userAccounts, userTokens });
+  const adminController = createAdminController({
+    userAccounts, roadReports, roadFeatures, localPlaces, liveTraffic, health: navigationController.health, now,
+  });
+  const placeDataController = createPlaceDataController({ localPlaces, savedPlaces, userAccounts });
   const router = createNavigationRoutes({
-    navigationController, roadDataController, authController, deviceTokens, userTokens, adminToken: nav.adminToken, rateLimits: nav.rateLimits, now,
+    navigationController, roadDataController, authController, adminController, placeDataController, deviceTokens, userTokens, adminToken: nav.adminToken, rateLimits: nav.rateLimits, now,
   });
 
   return {
     router,
     health: navigationController.health,
+    publicHealth: navigationController.publicHealth,
     services: {
-      deviceTokens, userTokens, userAccounts, geocoding, overpass, routing, liveTraffic, roadFeatures, roadReports, routePlanner,
+      deviceTokens, userTokens, userAccounts, geoapify, osrm, places, routing, liveTraffic, roadFeatures, localPlaces, savedPlaces, roadReports, routePlanner,
     },
   };
 }
@@ -77,16 +91,10 @@ function createNavigationApi({
 /** Startup warnings for settings that are fine locally but not in production. */
 function navigationWarnings(nav) {
   const warnings = [];
-  const host = (url) => { try { return new URL(url).hostname; } catch { return ''; } };
-  if (nav.routing.url && host(nav.routing.url) === 'router.project-osrm.org') {
-    warnings.push('Routing uses the public OSRM demo server (no SLA, ~1 request/s for this whole server). Set ROUTING_URL to a self-hosted OSRM for production.');
+  if (!nav.geoapify.apiKey) {
+    warnings.push(`GEOAPIFY_API_KEY is not set: place search and nearby places are disabled${nav.routing.osrmUrl ? '' : ', and so is routing'}.`);
   }
-  if (nav.geocoding.url && host(nav.geocoding.url) === 'nominatim.openstreetmap.org') {
-    warnings.push('Place search uses the public Nominatim server (max 1 request/s, no heavy use). Set GEOCODING_URL to a self-hosted or commercial Nominatim-compatible service for production.');
-  }
-  if (!nav.contactEmail && (nav.geocoding.url || nav.overpass.urls.length)) {
-    warnings.push('PROVIDER_CONTACT_EMAIL is not set: the OpenStreetMap services ask for a contact address in the User-Agent.');
-  }
+  if (!nav.routing.osrmUrl && nav.geoapify.apiKey) warnings.push('Routing uses Geoapify: free-flow times, up to three routes. Set ROUTING_OSRM_URL for your own OSRM server.');
   if (!nav.adminToken) warnings.push('NAV_ADMIN_TOKEN is not set: road-feature management and report moderation are disabled.');
   return warnings;
 }

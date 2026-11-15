@@ -134,6 +134,41 @@ function createRoadReportService({
       return { reports: inside.slice(0, limit), truncated: docs.length > limit };
     },
 
+    /** Operator listing in any status, newest first. Resolves { reports, total, page, limit }. */
+    async list({ status, type, page = 1, limit = 25 } = {}) {
+      requireDb();
+      const t = new Date(now());
+      const filter = {};
+      if (status === 'expired') Object.assign(filter, { status: 'active', expiresAt: { $lte: t } });
+      else if (status === 'active') Object.assign(filter, visible(t));
+      else if (status) filter.status = status;
+      if (type) filter.type = type;
+      const [docs, total] = await Promise.all([
+        Model.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+        Model.countDocuments(filter),
+      ]);
+      return {
+        reports: docs.map((d) => toPublic(d)), total, page, limit,
+      };
+    },
+
+    /** Operator statistics: reports by the status they show, and the visible ones by type. */
+    async counts() {
+      requireDb();
+      const t = new Date(now());
+      const [stored, expired, visibleByType] = await Promise.all([
+        Model.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]),
+        Model.countDocuments({ status: 'active', expiresAt: { $lte: t } }),
+        Model.aggregate([{ $match: visible(t) }, { $group: { _id: '$type', n: { $sum: 1 } } }]),
+      ]);
+      const byStatus = Object.fromEntries(stored.map((r) => [r._id, r.n]));
+      if (expired) {
+        byStatus.active = (byStatus.active || 0) - expired;
+        byStatus.expired = expired;
+      }
+      return { byStatus, activeByType: Object.fromEntries(visibleByType.map((r) => [r._id, r.n])) };
+    },
+
     async get(id, device = null) {
       requireDb();
       return toPublic(await load(id), device);

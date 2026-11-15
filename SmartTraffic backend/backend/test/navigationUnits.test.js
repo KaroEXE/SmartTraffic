@@ -9,10 +9,14 @@ const { TtlCache } = require('../utils/ttlCache');
 const {
   createThrottle, requestJson, createCircuitBreaker, UpstreamError,
 } = require('../utils/upstream');
+const { corsOrigin } = require('../utils/cors');
 const v = require('../utils/navValidation');
-const { instructionFor, routeSteps, normalizeRoute, routeId } = require('../services/navigation/routingService');
-const { toPlace } = require('../services/navigation/geocodingService');
-const { parseRoadFeatures, tilesFor, parseNearby } = require('../services/navigation/overpassService');
+const {
+  instructionFor, routeSteps, normalizeRoute, routeId, normalizeGeoapifyRoute, geoapifyManeuver, isSameRoad,
+} = require('../services/navigation/routingService');
+const { toPlace, toNearbyPlace, preferredLang, pickName } = require('../services/navigation/placeService');
+const { createGeoapifyClient, createOsrmClient, geoapifyError, osrmError } = require('../services/navigation/providerClient');
+const { fixture } = require('./helpers/navigationHarness');
 const {
   intersectionView, approachDirection, estimateRoute, trafficStatus,
 } = require('../services/navigation/liveTrafficService');
@@ -35,19 +39,6 @@ test('locateOnLine gives the distance to the line and the distance along it', ()
   assert.ok(Math.abs(r.distanceMeters - 50) < 1, `distance ${r.distanceMeters}`);
   assert.ok(Math.abs(r.alongMeters - 400) < 3, `along ${r.alongMeters}`);
   assert.equal(geo.locateOnLine(p, []).distanceMeters, Infinity);
-});
-
-test('alternatives: a route that doubles back or copies another is not useful', () => {
-  const direct = { geometry: { coordinates: line([0, -800], [0, 800]) }, duration: 600 };
-  const copy = { geometry: { coordinates: line([0, -800], [0, 800]) }, duration: 610 };
-  const spur = { geometry: { coordinates: line([0, -800], [0, 0], [400, 0], [0, 0], [0, 800]) }, duration: 700 };
-  const other = { geometry: { coordinates: line([0, -800], [600, -400], [600, 400], [0, 800]) }, duration: 800 };
-  const absurd = { geometry: { coordinates: line([0, -800], [-900, 0], [0, 800]) }, duration: 1600 };
-  assert.equal(geo.isUsefulAlternative(copy, [direct]), false);
-  assert.equal(geo.isUsefulAlternative(spur, [direct]), false);
-  assert.equal(geo.isUsefulAlternative(other, [direct]), true);
-  assert.equal(geo.isUsefulAlternative(absurd, [direct]), false, 'more than 2.5x the fastest time');
-  assert.equal(geo.viaCandidates(IX, { lat: IX.lat + 0.02, lng: IX.lng }).length, 12);
 });
 
 test('bbox helpers: padding, containment and the GeoJSON polygon', () => {
@@ -174,6 +165,8 @@ test('requestJson maps timeouts, unreachable hosts and 429 to stable codes', asy
   await assert.rejects(requestJson('http://x', { provider: 'P', fetchImpl: () => Promise.reject(new Error('ECONNREFUSED')) }), (e) => e.code === 'PROVIDER_UNREACHABLE');
   const limited = () => Promise.resolve(new Response('{}', { status: 429, headers: { 'Retry-After': '7' } }));
   await assert.rejects(requestJson('http://x', { provider: 'P', fetchImpl: limited }), (e) => e.code === 'PROVIDER_BUSY' && e.retryAfterSeconds === 7);
+  const quota = await requestJson('http://x', { provider: 'P', fetchImpl: limited, passRateLimit: true });
+  assert.equal(quota.status, 429, 'passRateLimit hands the 429 body to the caller');
   const html = () => Promise.resolve(new Response('<html>', { status: 502 }));
   await assert.rejects(requestJson('http://x', { provider: 'P', fetchImpl: html }), (e) => e.code === 'PROVIDER_ERROR' && !/http:\/\/x/.test(e.message));
   let sentUA = null;
@@ -254,7 +247,7 @@ test('route, search and language validation', () => {
 
 // ------------------------------------------------------------------- providers
 
-test('OSRM steps: English instructions, and no arrive/depart at an internal via point', () => {
+test('route steps: English instructions, and no arrive/depart at an internal via point', () => {
   assert.equal(instructionFor({ name: 'Salim St', maneuver: { type: 'turn', modifier: 'left' } }), 'Turn left onto Salim St');
   assert.equal(instructionFor({ name: '', maneuver: { type: 'turn', modifier: 'slight right' } }), 'Turn slightly right');
   assert.equal(instructionFor({ name: 'Ring Rd', maneuver: { type: 'roundabout', exit: 2 } }), 'At the roundabout, take the 2nd exit onto Ring Rd');
@@ -269,7 +262,7 @@ test('OSRM steps: English instructions, and no arrive/depart at an internal via 
   assert.deepEqual(steps.map((s) => s.maneuver.type), ['depart', 'turn', 'turn', 'arrive']);
 });
 
-test('OSRM routes are normalised with a stable geometry-derived id', () => {
+test('routes are normalised with a stable geometry-derived id', () => {
   const raw = {
     distance: 1234.56, duration: 200.04, geometry: { type: 'LineString', coordinates: line([0, 0], [500, 0]) },
     legs: [{ summary: 'Main Road, Ring Road', steps: [] }, { summary: 'Ring Road', steps: [] }],
@@ -280,41 +273,161 @@ test('OSRM routes are normalised with a stable geometry-derived id', () => {
   assert.equal(r.id, routeId(raw.geometry.coordinates));
   assert.match(r.id, /^rt_[0-9a-f]{12}$/);
   assert.equal(normalizeRoute({ ...raw, geometry: { type: 'Point', coordinates: [1, 2] } }), null);
+  assert.equal(normalizeRoute({ ...raw, geometry: 'encoded-polyline' }), null, 'an encoded polyline is not GeoJSON: geometries=geojson is required');
 });
 
-test('Nominatim and Overpass answers are parsed into the API shapes', () => {
-  const place = toPlace({
-    osm_type: 'way', osm_id: 7, lat: '35.56', lon: '45.43', name: 'Hospital', display_name: 'Hospital, Main St, City', category: 'amenity', type: 'hospital',
-    address: { road: 'Main St', city: 'City', country_code: 'iq' },
-  });
-  assert.equal(place.id, 'osm:way:7');
-  assert.equal(place.addressDetails.city, 'City');
-  assert.equal(toPlace({ lat: 'x', lon: '1' }), null);
+test('Geoapify place answers become API places with local-script names; missing data stays null', () => {
+  const search = fixture('search-hospital.json');
+  const feature = search.features.find((f) => f.properties.other_names && f.properties.other_names['name:ku'] && f.properties.other_names['name:ar']);
+  const props = feature.properties;
+  const place = toPlace(feature, 'ku');
+  assert.match(place.id, /^geoapify:/);
+  assert.equal(place.name, props.other_names['name:ku']);
+  assert.equal(toPlace(feature, 'ar').name, props.other_names['name:ar']);
+  assert.equal(toPlace(feature, 'en').name, props.name, 'English falls back to the provider name, never to the local script');
+  assert.equal(toPlace(feature, null).name, props.name, 'the local name by default');
+  assert.equal(place.addressDetails.state, props.state);
+  assert.equal(place.addressDetails.postcode, props.postcode);
+  assert.equal(place.type, props.result_type);
+  assert.equal(place.source, 'geoapify');
+  assert.equal(toPlace({ properties: { name: 'x', lat: null, lon: null } }, null), null, 'null is not the point 0,0');
+  assert.equal(toPlace({ properties: { name: 'x', lat: '35', lon: '45' } }, null), null, 'a text position is not a position');
+  assert.equal(toPlace({ properties: { lat: 35, lon: 45 } }, null), null, 'nothing to show');
+  assert.equal(toPlace({ properties: { name: 'Main', formatted: 'Main', lat: 35, lon: 45 } }, null).address, null, 'the address is not the name repeated');
 
-  const features = parseRoadFeatures({
-    elements: [
-      { type: 'node', id: 1, lat: 35.5, lon: 45.4, tags: { highway: 'speed_camera', maxspeed: '50 mph', direction: 'NE' } },
-      { type: 'way', id: 2, center: { lat: 35.51, lon: 45.41 }, tags: { traffic_calming: 'hump' } },
-      { type: 'node', id: 3, lat: 35.52, lon: 45.42, tags: { highway: 'bus_stop' } },
-    ],
-  });
-  assert.equal(features.length, 2);
-  assert.equal(features[0].speedLimitKmh, 80);
-  assert.equal(features[0].direction, 45);
-  assert.equal(features[0].verification, 'community');
-  assert.equal(features[1].name, 'Speed hump');
-  assert.deepEqual(tilesFor({ south: 0.01, west: 0.01, north: 0.06, east: 0.04 }, 0.05), ['0:0', '0:1']);
+  assert.equal(pickName({ name: 'N', other_names: { 'name:ckb': 'ک' } }, 'ku'), 'ک', 'Sorani (ckb) for Kurdish');
+  assert.equal(pickName({ name: 'N', name_international: { ar: 'ع' } }, 'ar'), 'ع');
+  assert.equal(pickName({ name: 'N' }, 'ar'), 'N');
+  assert.equal(pickName({ name: 'N', other_names: { name: 'محلي' } }, 'ar'), 'محلي', 'the name in the local script when there is none in Arabic');
+  assert.equal(pickName({ name: 'N', other_names: { name: 'محلي' } }, 'en'), 'N');
+  assert.equal(pickName({ name: ' ' }, 'ar'), null);
+  assert.equal(preferredLang('en-US,ar;q=0.8'), 'en');
+  assert.equal(preferredLang('ckb'), 'ku');
+  assert.equal(preferredLang('fr'), null);
 
-  const nearby = parseNearby({ elements: [{ type: 'node', id: 9, lat: 35.5, lon: 45.4, tags: { brand: 'FuelCo', 'addr:street': 'Main', 'addr:housenumber': '4' } }] }, { lat: 35.5, lng: 45.4 }, 'fuel');
-  assert.equal(nearby[0].name, 'FuelCo');
-  assert.equal(nearby[0].address, 'Main 4');
+  const fuel = fixture('places-fuel.json').features;
+  const near = toNearbyPlace(fuel[0], 'fuel', null);
+  assert.equal(near.category, 'fuel');
+  assert.equal(near.providerCategory, fuel[0].properties.categories.at(-1));
+  assert.equal(near.distanceMeters, Math.round(fuel[0].properties.distance));
+  assert.equal(near.rating, null, 'no reviews exist: no rating, not 0 stars');
+  assert.deepEqual(near.details, { brand: null, operator: null, openingHours: null, phone: null, website: null }, 'keys of the earlier answer stay');
+  assert.equal(toNearbyPlace({ properties: { lat: null, lon: null } }, 'fuel', null), null);
+});
+
+test('Geoapify routes (real answers) become one LineString with steps at the right points; copies are not alternatives', () => {
+  const [balanced, short, fewer] = ['route-balanced.json', 'route-short.json', 'route-less_maneuvers.json'].map((f) => fixture(f).features[0]);
+  const route = normalizeGeoapifyRoute(balanced);
+  assert.equal(route.geometry.type, 'LineString');
+  assert.deepEqual(route.geometry.coordinates[0], balanced.geometry.coordinates[0][0], '[lng, lat] stays [lng, lat]');
+  assert.equal(route.geometry.coordinates.length, balanced.geometry.coordinates.flat().length - (balanced.geometry.coordinates.length - 1), 'legs are joined without repeating the shared point');
+  assert.equal(route.distance, Math.round(balanced.properties.distance * 10) / 10);
+  assert.equal(route.duration, Math.round(balanced.properties.time * 10) / 10);
+  assert.match(route.id, /^rt_[0-9a-f]{12}$/);
+  assert.equal(route.summary, '', 'Geoapify gives no street names: nothing is invented');
+  const first = route.steps[0];
+  assert.equal(first.maneuver.type, 'depart');
+  assert.deepEqual(first.maneuver.location, route.geometry.coordinates[0]);
+  assert.equal(route.steps.at(-1).maneuver.type, 'arrive');
+  assert.ok(route.steps.every((s) => typeof s.instruction === 'string' && s.instruction));
+  const turn = route.steps.find((s) => s.maneuver.type === 'turn');
+  assert.ok(turn && ['left', 'right'].includes(turn.maneuver.modifier));
+  const gap = (a, b) => Math.hypot((a[0] - b[0]) * 91000, (a[1] - b[1]) * 111000);
+  const raw = balanced.properties.legs[0].steps.find((s) => s.instruction.type === 'Right' || s.instruction.type === 'Left');
+  assert.ok(gap(route.steps.find((s) => s.maneuver.type === 'turn').maneuver.location, balanced.geometry.coordinates[0][raw.from_index]) < 1, 'the step is located at from_index of the line');
+
+  assert.deepEqual(geoapifyManeuver('StartAtLeft'), { type: 'depart', modifier: 'left' });
+  assert.deepEqual(geoapifyManeuver('DestinationReachedRight'), { type: 'arrive', modifier: 'right' });
+  assert.deepEqual(geoapifyManeuver('SlightLeft'), { type: 'turn', modifier: 'slight left' });
+  assert.deepEqual(geoapifyManeuver('SharpRight'), { type: 'turn', modifier: 'sharp right' });
+  assert.deepEqual(geoapifyManeuver('RoundaboutEnter'), { type: 'roundabout', modifier: null });
+  assert.deepEqual(geoapifyManeuver('Uturn'), { type: 'turn', modifier: 'uturn' });
+  assert.deepEqual(geoapifyManeuver('Continue'), { type: 'continue', modifier: 'straight' });
+  assert.deepEqual(geoapifyManeuver('SomethingNew'), { type: null, modifier: null }, 'an unknown type is not guessed');
+
+  const a = normalizeGeoapifyRoute(balanced);
+  assert.equal(isSameRoad(a, normalizeGeoapifyRoute(balanced)), true, 'a route is the same road as itself');
+  assert.equal(isSameRoad(a, normalizeGeoapifyRoute(short)), false, 'the short route is a different route');
+  assert.equal(isSameRoad(a, normalizeGeoapifyRoute(fewer)), false, 'and so is the one with fewer turns');
+  assert.equal(normalizeGeoapifyRoute({ properties: { distance: 1, time: 1 }, geometry: { type: 'LineString', coordinates: [[1, 2], [3, 4]] } }), null, 'only MultiLineString is understood');
+  assert.equal(normalizeGeoapifyRoute({ properties: { distance: 'far', time: 1 }, geometry: { type: 'MultiLineString', coordinates: [[[1, 2], [3, 4]]] } }), null);
+});
+
+test('provider client: key only in a header, errors mapped without leaking, credits counted against the daily budget', async () => {
+  const seen = [];
+  const fetchImpl = (url, init) => { seen.push({ url, key: init.headers['x-api-key'] }); return Promise.resolve(Response.json({ ok: 1 })); };
+  const make = (cfg, extra = {}) => createGeoapifyClient({
+    config: { baseUrl: 'https://api.example.test', apiKey: 'secret-key-1', minIntervalMs: 0, timeoutMs: 500, dailyLimit: 0, ...cfg }, userAgent: 'UA/1', fetchImpl, ...extra,
+  });
+
+  const client = make({});
+  assert.deepEqual(await client.get('/v1/x', { text: 'y z' }), { ok: 1 });
+  assert.equal(seen[0].url, 'https://api.example.test/v1/x?text=y+z', 'the key is not in the URL');
+  assert.equal(seen[0].key, 'secret-key-1');
+  assert.equal(JSON.stringify(client.status()).includes('secret-key-1'), false, 'status never shows a key');
+
+  const none = make({ apiKey: '' });
+  assert.equal(none.enabled, false);
+  await assert.rejects(none.get('/v1/x'), (e) => e.code === 'FEATURE_DISABLED' && e.status === 503);
+
+  // daily budget in credits: a call that would go over is not sent; a new UTC day starts again
+  let clock = Date.UTC(2026, 0, 1, 23, 0, 0);
+  const budgeted = make({ dailyLimit: 4 }, { now: () => clock });
+  await budgeted.get('/v1/x');
+  await budgeted.get('/v1/x', {}, { cost: 2 });
+  const callsBefore = seen.length;
+  await assert.rejects(budgeted.get('/v1/x', {}, { cost: 2 }), (e) => e.code === 'PROVIDER_QUOTA_EXCEEDED' && e.status === 503 && e.retryAfterSeconds === 3600);
+  assert.equal(seen.length, callsBefore, 'nothing was sent over budget');
+  await budgeted.get('/v1/x');
+  assert.deepEqual(budgeted.status().dailyBudget, { limit: 4, usedToday: 4 });
+  clock += 3_600_000;
+  await budgeted.get('/v1/x');
+  assert.equal(budgeted.status().dailyBudget.usedToday, 1, 'a new UTC day starts a new budget');
+
+  const headers = { get: (n) => (n === 'retry-after' ? '120' : null) };
+  const body = (message) => ({ statusCode: 400, error: 'Bad Request', message: `${message} secret-key-1 https://x` });
+  assert.equal(geoapifyError(400, body('No suitable edges near location. Please check waypoint coordinate order (lat/lon).'), headers).code, 'POINT_NOT_ROUTABLE');
+  assert.equal(geoapifyError(400, body('Route not found'), headers).code, 'NO_ROUTE');
+  assert.equal(geoapifyError(400, body('"waypoints[0]" does not match any of the allowed types'), headers).code, 'INVALID_REQUEST');
+});
+
+test('provider errors: auth is generic, rate limiting keeps Retry-After, an own OSRM speaks its own codes', () => {
+  const headers = { get: (n) => (n === 'retry-after' ? '120' : null) };
+  const limited = geoapifyError(429, null, headers);
+  assert.deepEqual([limited.code, limited.status, limited.retryAfterSeconds], ['PROVIDER_BUSY', 429, 120]);
+  for (const status of [401, 403]) {
+    const e = geoapifyError(status, { statusCode: status, message: 'Invalid apiKey secret-key-1' }, headers);
+    assert.equal(e.code, 'PROVIDER_AUTH_FAILED');
+    assert.equal(e.name, 'ApiError', 'our key being refused is not a provider fault: it must not trip the breaker');
+    assert.doesNotMatch(e.message, /secret-key|apiKey/, 'provider text and keys are not passed on');
+  }
+  assert.equal(geoapifyError(500, null, headers).code, 'PROVIDER_ERROR');
+  assert.equal(osrmError(400, { code: 'NoRoute' }, headers).code, 'NO_ROUTE');
+  assert.equal(osrmError(400, { code: 'NoSegment' }, headers).code, 'POINT_NOT_ROUTABLE');
+  assert.equal(osrmError(400, { code: 'InvalidValue' }, headers).status, 400);
+  assert.equal(osrmError(502, null, headers).code, 'PROVIDER_ERROR');
+  const own = createOsrmClient({ config: { osrmUrl: '', timeoutMs: 500 } });
+  assert.equal(own.enabled, false, 'there is no default OSRM server: none exists that we may use');
+});
+
+test('CORS: listed origins only, localhost in development, nothing in production, * only when asked', async () => {
+  const check = (settings, origin) => new Promise((resolve) => { corsOrigin(settings)(origin, (e, ok) => resolve(ok)); });
+  const dev = { any: false, origins: [], allowLocalhost: true };
+  assert.equal(await check(dev, 'http://localhost:5173'), true);
+  assert.equal(await check(dev, 'https://evil.example'), false);
+  assert.equal(await check(dev, undefined), true, 'no Origin header: not a cross-site browser request');
+  const prod = { any: false, origins: ['https://app.example.com'], allowLocalhost: false };
+  assert.equal(await check(prod, 'https://app.example.com'), true);
+  assert.equal(await check(prod, 'http://localhost:3000'), false);
+  assert.equal(await check(prod, 'https://app.example.com.evil.test'), false);
+  assert.equal(corsOrigin({ any: true, origins: [], allowLocalhost: false }), '*');
 });
 
 // ---------------------------------------------------------------- live traffic
 
 const CFG = {
   staleAfterSeconds: 15, routeMatchMeters: 60, secondsPerVehicle: 2, longQueueVehicles: 10,
-  moderateDelaySeconds: 30, heavyDelaySeconds: 90, includePlaceholderPositions: false,
+  moderateDelaySeconds: 30, heavyDelaySeconds: 90,
 };
 const approach = (vehicles, queueLength, waitingTime) => ({
   vehicles, queueLength, waiting: waitingTime, waitingTime, available: true, classes: null, confidence: null,
@@ -363,7 +476,7 @@ test('intersection view: live, stale and no-data; unavailable approaches have nu
   assert.deepEqual(emergency.emergency, { type: 'ambulance', direction: 'east', since: null });
 });
 
-test('route estimate: delay of the approach the route enters by, alerts, placeholders excluded', () => {
+test('route estimate: delay of the approach the route enters by, alerts, unpositioned intersections excluded', () => {
   const view = intersectionView(snapshot(), CFG, Date.now());
   const southbound = { geometry: { coordinates: line([0, 800], [0, 0], [0, -800]) }, duration: 600 };
   assert.equal(approachDirection(southbound.geometry.coordinates, IX), 'north');
@@ -388,11 +501,56 @@ test('route estimate: delay of the approach the route enters by, alerts, placeho
   const bypass = { geometry: { coordinates: line([-800, 600], [800, 600]) }, duration: 640 };
   assert.equal(estimateRoute(bypass, [view], CFG).intersections.length, 0);
 
-  const placeholder = { ...view, positionSource: 'placeholder' };
-  assert.equal(estimateRoute(southbound, [placeholder], CFG).intersections.length, 0, 'unsurveyed positions are not matched');
-  assert.equal(estimateRoute(southbound, [placeholder], { ...CFG, includePlaceholderPositions: true }).delay, 80);
+  const unpositioned = { ...view, lat: null, lng: null, positionSource: 'unknown' };
+  assert.equal(estimateRoute(southbound, [unpositioned], CFG).intersections.length, 0, 'an intersection without a position is not matched');
 
   assert.equal(trafficStatus([e, blind]), 'included');
   assert.equal(trafficStatus([blind]), 'unavailable');
   assert.equal(trafficStatus([estimateRoute(bypass, [view], CFG)]), 'not-on-route');
+});
+
+// ------------------------------------------------------------------ hardening
+
+test('production start needs ingestion, token secrets and a database; locally nothing is enforced', () => {
+  const { productionProblems } = require('../config/production');
+  const good = {
+    trafficIngestToken: 'i'.repeat(20), mongodbUri: 'mongodb://x', navigation: { deviceTokenSecret: 'd'.repeat(32), userTokenSecret: 'u'.repeat(32) },
+  };
+  assert.deepEqual(productionProblems(good), []);
+  assert.equal(productionProblems({ ...good, trafficIngestToken: '' }).length, 1);
+  assert.equal(productionProblems({ ...good, mongodbUri: '' }).length, 1);
+  assert.equal(productionProblems({ ...good, navigation: { ...good.navigation, deviceTokenSecret: 'short' } }).length, 1);
+  assert.equal(productionProblems({ ...good, navigation: { deviceTokenSecret: 'x'.repeat(32), userTokenSecret: 'x'.repeat(32) } }).length, 1, 'the two secrets must differ');
+  assert.equal(productionProblems({ trafficIngestToken: '', mongodbUri: '', navigation: { deviceTokenSecret: '', userTokenSecret: '' } }).length, 4);
+});
+
+test('an operator token shorter than 16 characters disables administration', () => {
+  const { execFileSync } = require('child_process');
+  const read = (token) => execFileSync(process.execPath, ['-e', "console.log(JSON.stringify(require('./config').navigation.adminToken))"], {
+    cwd: require('path').join(__dirname, '..'), env: { ...process.env, NAV_ADMIN_TOKEN: token }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
+  assert.equal(read('short'), '""', 'five characters: refused');
+  assert.equal(read('x'.repeat(15)), '""');
+  assert.equal(read('x'.repeat(16)), JSON.stringify('x'.repeat(16)));
+});
+
+test('the simulation can be watched but not driven in production', async () => {
+  const express = require('express');
+  const { createSimulationRoutes } = require('../routes/trafficRoutes');
+  const read = new Proxy({}, { get: () => (req, res) => res.json({ ok: true }) });
+  const control = new Proxy({}, { get: () => (req, res) => res.json({ ok: true, ran: true }) });
+  for (const [locked, writeStatus] of [[true, 403], [false, 200]]) {
+    const app = express();
+    app.use('/api/simulation', createSimulationRoutes(read, control, { locked }));
+    const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+    try {
+      const base = `http://127.0.0.1:${server.address().port}/api/simulation`;
+      assert.equal((await fetch(`${base}/status`)).status, 200, 'reading is always allowed');
+      for (const [method, path] of [['POST', '/start'], ['POST', '/benchmark'], ['DELETE', '/ambulance/1']]) {
+        const res = await fetch(base + path, { method });
+        assert.equal(res.status, writeStatus, `${method} ${path} locked=${locked}`);
+        if (locked) assert.equal((await res.json()).code, 'SIMULATION_LOCKED');
+      }
+    } finally { server.closeAllConnections(); await new Promise((r) => { server.close(r); }); }
+  }
 });

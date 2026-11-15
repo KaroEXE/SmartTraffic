@@ -2,9 +2,10 @@ const mongoose = require('mongoose');
 
 /**
  * The one MongoDB connection used by the backend (mongoose's default
- * connection). The database only stores history; signal control never
- * waits for it. If it is missing or unreachable the backend keeps running,
- * says so in the log and in GET /api/health, and retries in the background.
+ * connection). Signal control never waits for it. At startup the backend
+ * verifies the connection when MONGODB_URI is set and refuses to start if it
+ * cannot connect (connectDatabase with required: true). Once running, a lost
+ * connection is logged, shown in GET /api/health and retried in the background.
  *
  *   status: disabled     MONGODB_URI not set - nothing is recorded
  *           invalid      MONGODB_URI cannot be parsed - not retried
@@ -108,17 +109,35 @@ async function attempt() {
   }
 }
 
-/** Connects once at startup. Resolves true when connected, false otherwise (never throws). */
-async function connectDatabase(uri) {
+const STARTUP_ATTEMPTS = 3;
+const STARTUP_PAUSE_MS = 2_000;
+
+/**
+ * Connects at startup. Resolves true when connected and false when there is no
+ * MONGODB_URI (nothing is recorded). With required: false a failed attempt
+ * resolves false and is retried in the background. With required: true it tries
+ * STARTUP_ATTEMPTS times and then rejects, so the caller can stop the process.
+ */
+async function connectDatabase(uri, { required = false } = {}) {
   if (state.status !== 'disabled') throw new Error('connectDatabase() was already called');
   if (!uri) {
-    console.warn('[database] MONGODB_URI is not set - traffic history will NOT be recorded (set it in backend/.env)');
+    console.warn('[database] MONGODB_URI is not set - traffic history, accounts, reports and road features need it (set it in backend/.env)');
     return false;
   }
   state.uri = uri;
   state.status = 'connecting';
   attachListeners();
-  return attempt();
+  if (!required) return attempt();
+  for (let i = 1; i <= STARTUP_ATTEMPTS; i += 1) {
+    if (await attempt()) return true;
+    if (state.retryTimer) clearTimeout(state.retryTimer);
+    state.retryTimer = null;
+    if (state.status === 'invalid') break;
+    if (i < STARTUP_ATTEMPTS) await new Promise((resolve) => { setTimeout(resolve, STARTUP_PAUSE_MS); });
+  }
+  throw new Error(state.status === 'invalid'
+    ? 'MONGODB_URI is invalid'
+    : `MongoDB is not reachable (${state.lastError || 'no answer'}). Check MONGODB_URI and that the database is running.`);
 }
 
 function isDatabaseConnected() {

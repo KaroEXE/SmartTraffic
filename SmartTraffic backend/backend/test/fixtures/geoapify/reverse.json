@@ -1,0 +1,69 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "datasource": {
+     "sourcename": "openstreetmap",
+     "attribution": "© OpenStreetMap contributors",
+     "license": "Open Database License",
+     "url": "https://www.openstreetmap.org/copyright"
+    },
+    "name": "azadi park cafe",
+    "country": "Iraq",
+    "country_code": "iq",
+    "region": "Iraqi Kurdistan Region",
+    "state": "Sulaymaniyah Governorate",
+    "city": "Sulaymaniyah",
+    "postcode": "46001",
+    "district": "Sulaymaniyah District",
+    "suburb": "کانی ئاسکان",
+    "street": "شەقامی شەرەفخان",
+    "iso3166_2": "IQ-KR",
+    "iso3166_2_sublevel": "IQ-SU",
+    "lon": 45.4328312,
+    "lat": 35.5627328,
+    "county": "Sulaymaniya",
+    "state_code": "SL",
+    "distance": 115.01077745258584,
+    "result_type": "amenity",
+    "formatted": "azadi park cafe, کانی ئاسکان, شەقامی شەرەفخان, Sulaymaniyah, 46001, Iraq",
+    "address_line1": "azadi park cafe",
+    "address_line2": "کانی ئاسکان, شەقامی شەرەفخان, Sulaymaniyah, 46001, Iraq",
+    "category": "catering.cafe",
+    "timezone": {
+     "name": "Asia/Baghdad",
+     "offset_STD": "+03:00",
+     "offset_DST": "+03:00",
+     "offset_STD_seconds": 10800,
+     "offset_DST_seconds": 10800
+    },
+    "plus_code": "8H77HC7M+34",
+    "rank": {
+     "importance": 0.000057954528114702334,
+     "popularity": 2.6468387675136826
+    },
+    "place_id": "511f58440367b74640597931dea007c84140f00102f901ff175b2e00000000c0020192030f617a616469207061726b2063616665e203216f70656e7374726565746d61703a76656e75653a7761792f373737373231383535"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     45.4328312,
+     35.5627328
+    ]
+   },
+   "bbox": [
+    45.4327608,
+    35.5626673,
+    45.4328935,
+    35.5627684
+   ]
+  }
+ ],
+ "query": {
+  "lat": 35.5617,
+  "lon": 45.4329,
+  "plus_code": "8H77HC6M+M5"
+ }
+}
