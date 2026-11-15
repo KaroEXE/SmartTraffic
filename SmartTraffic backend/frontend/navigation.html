@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
+  <link rel="icon" href="data:,">
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0a0c0e">
@@ -8,7 +9,7 @@
   <title>SmartTraffic Navigation</title>
   <link rel="manifest" href="navigation/manifest.webmanifest">
   <link rel="icon" href="navigation/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css">
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="navigation/navigation.css">
 </head>
@@ -37,6 +38,7 @@
         </button>
       </div>
       <ul class="nv-results" id="nv-results" role="listbox" aria-label="Search results" hidden></ul>
+      <p class="nv-attrib" id="nv-results-attrib" hidden>Results: <a href="https://www.geoapify.com/" target="_blank" rel="noopener">Powered by Geoapify</a> &middot; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">&copy; OpenStreetMap contributors</a></p>
       <div class="nv-search-msg" id="nv-search-msg" role="status" hidden></div>
     </form>
   </header>
@@ -61,14 +63,16 @@
     </button>
     <div class="nv-feed" id="nv-feed" role="status"></div>
     <div class="nv-sheet-body" id="nv-sheet-body"></div>
-    <div class="nv-sheet-foot"><a href="/">Operator dashboard</a></div>
+    <div class="nv-sheet-foot"><a href="/">Operator dashboard</a>
+      <p class="nv-attrib">Search and routes: <a href="https://www.geoapify.com/" target="_blank" rel="noopener">Powered by Geoapify</a> &middot; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">&copy; OpenStreetMap contributors</a></p></div>
   </section>
+
+  <dialog class="nv-report" id="nv-report"></dialog>
 
   <div class="nv-banner" id="nv-offline" role="alert" hidden>You are offline. Map tiles, search and routing need an internet connection.</div>
   <div class="nv-toast" id="nv-toast" role="status" aria-live="polite" hidden></div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/vendor/leaflet/leaflet.js"></script>
   <script type="module" src="navigation/navApp.js"></script>
 </body>
 </html>

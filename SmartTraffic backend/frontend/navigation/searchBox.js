@@ -4,14 +4,18 @@ import { distanceMeters } from './geo.js';
 
 /**
  * Destination search field with a keyboard-navigable result list.
- * Searches on submit (Enter / search button), never per keystroke: the
- * Nominatim usage policy forbids search-as-you-type.
+ * Searches on submit (Enter / search button), never per keystroke: every search
+ * costs a provider credit and the backend limits searches per client.
+ * `attribution` (optional element) is the provider credit shown while results are.
  */
 export class SearchBox {
-  constructor({ form, input, results, message, geocoder, getViewbox, onSelect, onCleared }) {
+  constructor({
+    form, input, results, message, geocoder, getViewbox, onSelect, onCleared, attribution = null,
+  }) {
     this.form = form;
     this.input = input;
     this.results = results;
+    this.attribution = attribution;
     this.message = message;
     this.geocoder = geocoder;
     this.getViewbox = getViewbox;
@@ -89,12 +93,14 @@ export class SearchBox {
         <span class="nv-result-addr">${escapeHtml(p.address)}</span></li>`;
     }).join('');
     this.results.hidden = false;
+    if (this.attribution) this.attribution.hidden = false;
     this.input.setAttribute('aria-expanded', 'true');
     this._highlight(-1);
   }
 
   _closeResults() {
     this.results.hidden = true;
+    if (this.attribution) this.attribution.hidden = true;
     this.input.setAttribute('aria-expanded', 'false');
     this.input.removeAttribute('aria-activedescendant');
     this.active = -1;

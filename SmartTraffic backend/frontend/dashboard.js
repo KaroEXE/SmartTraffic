@@ -205,7 +205,8 @@ export function setSelected(id, name, snap) {
   setText($('vp-title'), name || id);
   if (snap) {
     const where = positionLabel(snap);
-    setText($('vp-sub'), `${id}  ·  ${snap.lat.toFixed(4)}, ${snap.lng.toFixed(4)}${where ? `  ·  ${where}` : ''}`);
+    const position = Number.isFinite(snap.lat) && Number.isFinite(snap.lng) ? `${snap.lat.toFixed(4)}, ${snap.lng.toFixed(4)}` : 'position not surveyed';
+    setText($('vp-sub'), `${id}  ·  ${position}${where && Number.isFinite(snap.lat) ? `  ·  ${where}` : ''}`);
   }
   setText($('ev-scope'), scopeLabel(name || id));
 }

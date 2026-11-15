@@ -3,7 +3,7 @@ import { distanceMeters, distanceToPolylineMeters } from './geo.js';
 /**
  * Route ranking with live AI traffic (no DOM, no network).
  *
- *   estimate = routing provider's travel time (OSRM)
+ *   estimate = routing provider's travel time (free-flow, no provider traffic)
  *            + live delay at every AI-monitored intersection the route passes
  *
  * Live delay at one intersection comes from the AI service's latest
@@ -49,94 +49,6 @@ export function bearingDegrees(a, b) {
     - Math.sin(a.lat * rad) * Math.cos(b.lat * rad) * Math.cos((b.lng - a.lng) * rad);
   return ((Math.atan2(y, x) / rad) + 360) % 360;
 }
-
-/** Points along a polyline about every `step` metres (always includes the ends). */
-export function samplePolyline(coords, step = 25) {
-  if (!coords || coords.length === 0) return [];
-  const out = [{ ...toPoint(coords[0]), along: 0 }];
-  let along = 0;
-  let next = step;
-  for (let i = 1; i < coords.length; i += 1) {
-    const a = toPoint(coords[i - 1]);
-    const b = toPoint(coords[i]);
-    const seg = distanceMeters(a, b);
-    while (seg > 0 && next <= along + seg) {
-      const t = (next - along) / seg;
-      out.push({ lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t, along: next });
-      next += step;
-    }
-    along += seg;
-  }
-  const last = toPoint(coords[coords.length - 1]);
-  if (along - out[out.length - 1].along > 1) out.push({ ...last, along });
-  return out;
-}
-
-/** Share (0-1) of route `a`'s length that runs within `toleranceM` of route `b`. */
-export function overlapRatio(a, b, toleranceM = 30) {
-  const samples = samplePolyline(a, 25);
-  if (!samples.length) return 0;
-  const near = samples.filter((p) => distanceToPolylineMeters(p, b) <= toleranceM).length;
-  return near / samples.length;
-}
-
-/**
- * True when the route doubles back on itself: it returns within `nearM` of
- * a point it passed at least `gapM` earlier (an out-and-back spur to a via
- * point). Such a route is not a real alternative and is never shown.
- */
-export function hasBacktrack(coords, { nearM = 15, gapM = 200 } = {}) {
-  const s = samplePolyline(coords, 20);
-  for (let i = 0; i < s.length; i += 1) {
-    for (let j = i + 1; j < s.length; j += 1) {
-      if (s[j].along - s[i].along < gapM) continue;
-      if (distanceMeters(s[i], s[j]) <= nearM) return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Via points for extra alternatives: beside the straight start-destination
- * line, nearest first. The router turns each into a road-following route.
- */
-export function viaCandidates(start, destination) {
-  const d = distanceMeters(start, destination);
-  const kx = 111320 * Math.cos((start.lat * Math.PI) / 180);
-  const ky = 110540;
-  const dx = (destination.lng - start.lng) * kx;
-  const dy = (destination.lat - start.lat) * ky;
-  const len = Math.hypot(dx, dy) || 1;
-  const nx = -dy / len; // unit normal (metres)
-  const ny = dx / len;
-  const at = (t, offset) => ({
-    lat: start.lat + (dy * t + ny * offset * d) / ky,
-    lng: start.lng + (dx * t + nx * offset * d) / kx,
-  });
-  return [
-    at(0.5, 0.2), at(0.5, -0.2),
-    at(0.5, 0.35), at(0.5, -0.35),
-    at(0.35, 0.3), at(0.65, -0.3),
-    at(0.65, 0.3), at(0.35, -0.3),
-    at(0.5, 0.5), at(0.5, -0.5),
-    at(0.25, 0.15), at(0.75, -0.15),
-  ];
-}
-
-/**
- * A candidate is a usable extra route when it follows different roads from
- * every route already shown, does not double back, and is not an absurd
- * detour compared with the fastest route.
- */
-export function isUsefulAlternative(candidate, existing, { maxOverlap = 0.8, maxDetourFactor = 2.5 } = {}) {
-  if (hasBacktrack(candidate.coordinates)) return false;
-  const fastest = Math.min(...existing.map((r) => r.duration));
-  if (Number.isFinite(fastest) && candidate.duration > fastest * maxDetourFactor) return false;
-  return existing.every((r) => overlapRatio(candidate.coordinates, r.coordinates) < maxOverlap
-    && overlapRatio(r.coordinates, candidate.coordinates) < maxOverlap);
-}
-
-// ------------------------------------------------------------- live traffic
 
 /**
  * Approach (where the vehicle comes from, as the AI service names it) by

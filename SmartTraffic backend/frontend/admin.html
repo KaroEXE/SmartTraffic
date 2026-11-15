@@ -4,67 +4,222 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex">
-  <title>Road Report Review</title>
-  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="style.css">
-  <style>
-    body.ad { margin: 0; min-height: 100vh; background: var(--bg, #0a0c0e); color: var(--text, #e6e8ea); font: 15px/1.45 var(--sans, system-ui, sans-serif); }
-    .ad-wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
-    .ad h1 { font-size: 20px; margin: 0 0 4px; }
-    .ad-sub { color: var(--text-3, #8b949e); margin: 0 0 16px; font-size: 14px; }
-    .ad-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-    .ad input, .ad select, .ad button { font: inherit; min-height: 40px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line-2, #30363d); background: var(--surface-2, #161b22); color: inherit; }
-    .ad input { flex: 1; min-width: 200px; }
-    .ad button { cursor: pointer; }
-    .ad button.ad-ok { background: #2ea043; border-color: #2ea043; color: #fff; font-weight: 600; }
-    .ad button.ad-no { border-color: #d92d20; color: #ff7b72; }
-    .ad button:disabled { opacity: 0.5; cursor: default; }
-    .ad-grid { display: grid; gap: 12px; grid-template-columns: 1fr; }
-    @media (min-width: 900px) { .ad-grid { grid-template-columns: 1fr 1fr; } }
-    #ad-map { height: 420px; border-radius: 10px; border: 1px solid var(--line-2, #30363d); }
-    .ad-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-    .ad-item { padding: 12px; border-radius: 10px; border: 1px solid var(--line-2, #30363d); background: var(--surface, #0f1215); }
-    .ad-item.ad-active { border-color: #5a9cf8; }
-    .ad-item h2 { font-size: 15px; margin: 0; }
-    .ad-meta { color: var(--text-3, #8b949e); font-size: 13px; }
-    .ad-note { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-    .ad-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-    .ad-msg { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line-2, #30363d); margin-bottom: 12px; }
-    .ad-msg[hidden] { display: none; }
-    .ad-msg.ad-err { border-color: #d92d20; }
-    .ad a { color: #5a9cf8; }
-  </style>
+  <title>SmartTraffic Admin</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css">
+  <link rel="stylesheet" href="admin.css">
 </head>
-<body class="ad">
-  <main class="ad-wrap">
-    <h1>Road report review</h1>
-    <p class="ad-sub">Reports from drivers appear on the navigation map only after you approve them. <a href="navigation.html">Open navigation</a></p>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
 
-    <form class="ad-bar" id="ad-login" autocomplete="off">
-      <label for="ad-token" class="ad-meta">Admin token</label>
-      <input id="ad-token" type="password" placeholder="ADMIN_TOKEN from backend/.env" required>
-      <button type="submit">Load reports</button>
-    </form>
-
-    <div class="ad-bar">
-      <label for="ad-status" class="ad-meta">Show</label>
-      <select id="ad-status">
-        <option value="pending">Waiting for review</option>
-        <option value="approved">Approved (on the map)</option>
-        <option value="rejected">Rejected</option>
-        <option value="all">All</option>
-      </select>
-      <button type="button" id="ad-refresh">Refresh</button>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="2" width="8" height="20" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="7" r="1.8" fill="#e5484d"/><circle cx="12" cy="12" r="1.8" fill="#f2b632"/><circle cx="12" cy="17" r="1.8" fill="#2fd06b"/></svg>
+      <div>
+        <div class="brand-name">SmartTraffic</div>
+        <div class="brand-sub">Admin console</div>
+      </div>
     </div>
+    <nav class="topnav" aria-label="Other pages">
+      <a href="/">Operations dashboard</a>
+      <a href="/navigation.html">Navigation map</a>
+      <a href="/api/docs/">API docs</a>
+      <button type="button" id="signout" class="btn btn-quiet" hidden>Sign out</button>
+    </nav>
+  </header>
 
-    <div class="ad-msg" id="ad-msg" role="status" hidden></div>
+  <main id="main" tabindex="-1">
+    <!-- ---------------------------------------------------------- sign in -->
+    <section id="login" class="card login" aria-labelledby="login-title">
+      <h1 id="login-title">Admin sign in</h1>
+      <p class="muted">Enter the admin token. It is the value of <code>NAV_ADMIN_TOKEN</code> in <code>backend/.env</code>. It stays in this browser tab only and is cleared when you sign out or close the tab.</p>
+      <form id="login-form" autocomplete="off">
+        <label for="token">Admin token</label>
+        <input id="token" name="token" type="password" required autocomplete="off" spellcheck="false">
+        <button type="submit" class="btn btn-primary">Sign in</button>
+      </form>
+      <p id="login-msg" class="msg" role="alert" hidden></p>
+    </section>
 
-    <div class="ad-grid">
-      <div id="ad-map" aria-label="Map of the listed reports"></div>
-      <ul class="ad-list" id="ad-list" aria-label="Reports"></ul>
+    <!-- ------------------------------------------------------------- app -->
+    <div id="app" hidden>
+      <p id="msg" class="msg" role="status" hidden></p>
+
+      <div class="tabs" role="tablist" aria-label="Admin sections">
+        <button type="button" role="tab" id="tab-overview" aria-controls="panel-overview" aria-selected="true">Overview</button>
+        <button type="button" role="tab" id="tab-reports" aria-controls="panel-reports" aria-selected="false" tabindex="-1">Reports</button>
+        <button type="button" role="tab" id="tab-features" aria-controls="panel-features" aria-selected="false" tabindex="-1">Road features</button>
+        <button type="button" role="tab" id="tab-places" aria-controls="panel-places" aria-selected="false" tabindex="-1">Places</button>
+        <button type="button" role="tab" id="tab-users" aria-controls="panel-users" aria-selected="false" tabindex="-1">Users</button>
+        <button type="button" role="tab" id="tab-map" aria-controls="panel-map" aria-selected="false" tabindex="-1">Map</button>
+      </div>
+
+      <!-- overview -->
+      <section id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" tabindex="0">
+        <div class="panel-head">
+          <h1>Overview</h1>
+          <button type="button" class="btn" id="overview-refresh">Refresh</button>
+        </div>
+        <p class="muted" id="overview-time"></p>
+        <h2 class="section-title">System status</h2>
+        <div class="grid" id="status-cards" aria-live="polite"></div>
+        <h2 class="section-title">In numbers</h2>
+        <div class="grid" id="stat-cards"></div>
+      </section>
+
+      <!-- reports -->
+      <section id="panel-reports" role="tabpanel" aria-labelledby="tab-reports" tabindex="0" hidden>
+        <div class="panel-head">
+          <h1>Driver reports</h1>
+          <button type="button" class="btn" id="reports-refresh">Refresh</button>
+        </div>
+        <p class="muted">Reports sent from the apps (accidents, jams, closures, ...). Removing or resolving a report hides it from drivers.</p>
+        <form class="filters" id="reports-filters">
+          <div><label for="reports-status">Status</label>
+            <select id="reports-status">
+              <option value="">Any status</option><option value="active">Active</option><option value="expired">Expired</option>
+              <option value="resolved">Resolved</option><option value="dismissed">Dismissed by drivers</option>
+              <option value="withdrawn">Withdrawn</option><option value="removed">Removed</option>
+            </select></div>
+          <div><label for="reports-type">Type</label>
+            <select id="reports-type">
+              <option value="">Any type</option><option value="accident">Accident</option><option value="traffic_jam">Traffic jam</option>
+              <option value="road_closure">Road closure</option><option value="construction">Construction</option><option value="hazard">Hazard</option>
+            </select></div>
+        </form>
+        <div class="table-wrap" id="reports-table"></div>
+        <div class="pager" id="reports-pager"></div>
+      </section>
+
+      <!-- road features -->
+      <section id="panel-features" role="tabpanel" aria-labelledby="tab-features" tabindex="0" hidden>
+        <div class="panel-head">
+          <h1>Road features</h1>
+          <div class="actions">
+            <button type="button" class="btn" id="features-refresh">Refresh</button>
+            <button type="button" class="btn btn-primary" id="feature-add">Add road feature</button>
+          </div>
+        </div>
+        <p class="muted">Speed cameras, speed bumps, closures and roadworks that drivers see on the map. Only features you add here are shown: nothing is imported from elsewhere.</p>
+        <form class="filters" id="features-filters">
+          <div><label for="features-kind">Kind</label>
+            <select id="features-kind">
+              <option value="">Any kind</option><option value="speed_camera">Speed camera</option><option value="speed_bump">Speed bump</option>
+              <option value="road_closure">Road closure</option><option value="roadworks">Roadworks</option>
+            </select></div>
+          <div><label for="features-active">Visibility</label>
+            <select id="features-active">
+              <option value="">Active and hidden</option><option value="true">Active (shown to drivers)</option><option value="false">Hidden</option>
+            </select></div>
+        </form>
+        <div class="table-wrap" id="features-table"></div>
+        <div class="pager" id="features-pager"></div>
+      </section>
+
+      <!-- places -->
+      <section id="panel-places" role="tabpanel" aria-labelledby="tab-places" tabindex="0" hidden>
+        <div class="panel-head">
+          <h1>Places</h1>
+          <div class="actions">
+            <button type="button" class="btn" id="places-refresh">Refresh</button>
+            <button type="button" class="btn btn-primary" id="place-add">Add place</button>
+          </div>
+        </div>
+        <p class="muted">Important places that you enter yourself (hospitals, mosques, landmarks and so on). Drivers see them on the map and find them when they search, before any result from the search provider. Names can be given in Arabic and Kurdish too.</p>
+        <form class="filters" id="places-filters">
+          <div><label for="places-category">Category</label>
+            <select id="places-category"><option value="">Any category</option></select></div>
+          <div><label for="places-active">Visibility</label>
+            <select id="places-active">
+              <option value="">Shown and hidden</option><option value="true">Shown to drivers</option><option value="false">Hidden</option>
+            </select></div>
+        </form>
+        <div class="table-wrap" id="places-table"></div>
+        <div class="pager" id="places-pager"></div>
+      </section>
+
+      <!-- users -->
+      <section id="panel-users" role="tabpanel" aria-labelledby="tab-users" tabindex="0" hidden>
+        <div class="panel-head">
+          <h1>Users</h1>
+          <button type="button" class="btn" id="users-refresh">Refresh</button>
+        </div>
+        <p class="muted">Accounts created in the mobile app. Passwords are never shown or stored in readable form.</p>
+        <form class="filters" id="users-filters">
+          <div class="grow"><label for="users-q">Search by start of email</label>
+            <input id="users-q" type="search" maxlength="80" autocomplete="off" placeholder="for example sara@"></div>
+          <button type="submit" class="btn">Search</button>
+        </form>
+        <div class="table-wrap" id="users-table"></div>
+        <div class="pager" id="users-pager"></div>
+      </section>
+
+      <!-- map -->
+      <section id="panel-map" role="tabpanel" aria-labelledby="tab-map" tabindex="0" hidden>
+        <div class="panel-head">
+          <h1>Map</h1>
+          <button type="button" class="btn" id="map-refresh">Refresh</button>
+        </div>
+        <p class="muted">Active road features, driver reports and places. Click the map to add a road feature or a place at that point.</p>
+        <div id="admin-map" role="application" aria-label="Map of road features, driver reports and places"></div>
+        <ul class="legend" aria-label="Map legend">
+          <li><span class="dot dot-feature"></span> Road feature</li>
+          <li><span class="dot dot-report"></span> Driver report</li>
+          <li><span class="dot dot-place"></span> Place</li>
+        </ul>
+      </section>
     </div>
   </main>
-  <script src="/vendor/leaflet/leaflet.js"></script>
-  <script src="admin.js"></script>
+
+  <!-- add / edit a road feature -->
+  <dialog id="feature-dialog" aria-labelledby="feature-dialog-title">
+    <form id="feature-form" method="dialog" novalidate>
+      <h2 id="feature-dialog-title">Add road feature</h2>
+      <div class="form-grid">
+        <div><label for="f-kind">Kind</label>
+          <select id="f-kind" required>
+            <option value="speed_camera">Speed camera</option><option value="speed_bump">Speed bump</option>
+            <option value="road_closure">Road closure</option><option value="roadworks">Roadworks</option>
+          </select></div>
+        <div><label for="f-name">Name (optional)</label><input id="f-name" maxlength="120"></div>
+        <div><label for="f-lat">Latitude</label><input id="f-lat" type="number" step="any" min="-90" max="90" required inputmode="decimal"></div>
+        <div><label for="f-lng">Longitude</label><input id="f-lng" type="number" step="any" min="-180" max="180" required inputmode="decimal"></div>
+        <div><label for="f-speed">Speed limit km/h (optional)</label><input id="f-speed" type="number" min="5" max="200" step="1" inputmode="numeric"></div>
+        <div><label for="f-direction">Direction in degrees, 0-359 (optional)</label><input id="f-direction" type="number" min="0" max="359.9" step="any" inputmode="decimal"></div>
+        <div class="span2"><label for="f-description">Description (optional)</label><input id="f-description" maxlength="500"></div>
+        <div><label for="f-until">Shown until (optional)</label><input id="f-until" type="datetime-local"></div>
+        <div class="check"><input id="f-active" type="checkbox" checked><label for="f-active">Show to drivers</label></div>
+      </div>
+      <p id="feature-msg" class="msg" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="feature-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="feature-save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- add / edit a place -->
+  <dialog id="place-dialog" aria-labelledby="place-dialog-title">
+    <form id="place-form" method="dialog" novalidate>
+      <h2 id="place-dialog-title">Add place</h2>
+      <div class="form-grid">
+        <div class="span2"><label for="p-name">Name</label><input id="p-name" maxlength="120" required></div>
+        <div><label for="p-name-ar">Name in Arabic (optional)</label><input id="p-name-ar" maxlength="120" dir="auto"></div>
+        <div><label for="p-name-ku">Name in Kurdish (optional)</label><input id="p-name-ku" maxlength="120" dir="auto"></div>
+        <div><label for="p-category">Category</label><select id="p-category" required></select></div>
+        <div class="check"><input id="p-active" type="checkbox" checked><label for="p-active">Show to drivers</label></div>
+        <div><label for="p-lat">Latitude</label><input id="p-lat" type="number" step="any" min="-90" max="90" required inputmode="decimal"></div>
+        <div><label for="p-lng">Longitude</label><input id="p-lng" type="number" step="any" min="-180" max="180" required inputmode="decimal"></div>
+        <div class="span2"><label for="p-description">Description (optional)</label><input id="p-description" maxlength="500"></div>
+      </div>
+      <p id="place-msg" class="msg" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="place-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="place-save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="admin.js"></script>
 </body>
 </html>

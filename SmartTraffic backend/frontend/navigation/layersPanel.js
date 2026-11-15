@@ -10,6 +10,8 @@ const LAYERS = [
   { id: 'speed_camera', label: 'Speed cameras', icon: ICON_HTML.speed_camera, defaultOn: true },
   { id: 'speed_bump', label: 'Speed bumps', icon: ICON_HTML.speed_bump, defaultOn: true },
   { id: 'road_closure', label: 'Road closures', icon: ICON_HTML.road_closure, defaultOn: true },
+  { id: 'report', label: 'Driver reports', icon: ICON_HTML.report, defaultOn: true },
+  { id: 'place', label: 'Hawr places', icon: ICON_HTML.place, defaultOn: true },
 ];
 
 const LEGEND = [
@@ -17,6 +19,8 @@ const LEGEND = [
   [ICON_HTML.routeRank(1), 'Route 2 — 2nd best'],
   [ICON_HTML.routeRank(2), 'Route 3 — 3rd best'],
   [ICON_HTML.routeRank(3), 'Route 4 — Slowest'],
+  [ICON_HTML.report, 'Driver report (accident, jam, closure, roadworks, hazard)'],
+  [ICON_HTML.place, 'Important place entered by Hawr'],
   [ICON_HTML.start, 'Start'],
   [ICON_HTML.destination, 'Destination'],
   [ICON_HTML.user, 'Your location'],

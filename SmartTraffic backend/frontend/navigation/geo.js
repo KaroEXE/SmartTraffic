@@ -1,6 +1,6 @@
 /**
  * Geometry helpers (no DOM). Points are { lat, lng }; polylines are arrays
- * of [lat, lng] pairs, the form Leaflet uses.
+ * of [lat, lng] pairs, the form the routes and the ranking use.
  */
 
 const EARTH_RADIUS_M = 6371008.8;
@@ -76,6 +76,18 @@ export function bboxContains(outer, inner) {
 }
 
 /** Grows a bbox by a fraction of its size on every side. */
+/** The box around its own centre, cut down to at most `maxSpanDeg` degrees per side. */
+export function clampBBox(bbox, maxSpanDeg) {
+  if (bbox.north - bbox.south <= maxSpanDeg && bbox.east - bbox.west <= maxSpanDeg) return bbox;
+  const lat = (bbox.north + bbox.south) / 2;
+  const lng = (bbox.east + bbox.west) / 2;
+  const halfLat = Math.min(bbox.north - bbox.south, maxSpanDeg) / 2;
+  const halfLng = Math.min(bbox.east - bbox.west, maxSpanDeg) / 2;
+  return {
+    south: lat - halfLat, north: lat + halfLat, west: lng - halfLng, east: lng + halfLng,
+  };
+}
+
 export function padBBox(bbox, fraction) {
   const dLat = (bbox.north - bbox.south) * fraction;
   const dLng = (bbox.east - bbox.west) * fraction;

@@ -1,21 +1,23 @@
-/* global L */
 import { trafficSummary, positionLabel } from './metrics.js';
+import { createBaseMap, Marker, Popup } from './mapCore.js';
+import { loadMapConfig } from './mapConfig.js';
 import { corridorIndex, siteState } from './three/networkView.js';
 
 /**
- * Geographic layer: OpenStreetMap tiles via Leaflet with one traffic-light
- * marker per intersection - the same intersections, by the same ids, as the
- * 3D street network. Clicking a marker selects that intersection.
- * Marker shows the lit aspect, the direction currently served and (ring)
- * the estimated congestion; its tooltip lists the four signals, counts,
- * data state and whether the position is surveyed.
+ * Geographic layer of the operations dashboard: OpenFreeMap vector tiles drawn by
+ * MapLibre GL JS, with one traffic-light marker per intersection - the same
+ * intersections, by the same ids, as the 3D street network. Clicking a marker selects
+ * that intersection. A marker shows the lit aspect, the direction currently served and
+ * (ring) the estimated congestion; hovering it lists the four signals, counts, data state
+ * and whether the position is surveyed.
+ *
+ * The map is created once. The markers wait for it: the map style is fetched from the
+ * backend's /api/client-config answer and OpenFreeMap, and a marker added earlier would
+ * have no map to sit on.
  */
 
 const DIRS = ['north', 'south', 'east', 'west'];
 const esc = (text) => String(text).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-
-const TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-const ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
 function markerHtml(info, selected) {
   const aspect = info.greenDirection ? (info.signals ? info.signals[info.greenDirection] : 'GREEN') : 'RED';
@@ -58,34 +60,26 @@ function tooltipHtml(info) {
 
 export class NetworkMap {
   constructor(element, intersections, onSelect) {
+    this.element = element;
     this.onSelect = onSelect;
     this.connected = true;
-    this.markers = new Map();
+    this.markers = new Map(); // id -> maplibre Marker
     this.info = new Map();
     this.keys = new Map();
     this.selectedId = null;
-
-    this.map = L.map(element, {
-      zoomControl: true,
-      attributionControl: true,
-      zoomSnap: 0.5,
+    this.map = null;
+    this.hovered = null;
+    this.tip = new Popup({
+      closeButton: false, closeOnClick: false, className: 'tl-tooltip', offset: 16, maxWidth: '280px',
     });
-    L.tileLayer(TILE_URL, { maxZoom: 19, attribution: ATTRIBUTION }).addTo(this.map);
+    this.intersections = intersections;
 
-    this.element = element;
-    this.pendingFit = null;
-    this.setIntersections(intersections);
-
-    // Leaflet needs a nudge when its container is resized by CSS grid. A fit
-    // requested while the map was hidden (another view open) is done now.
-    new ResizeObserver(() => {
-      this.map.invalidateSize();
-      if (this.pendingFit && element.clientWidth > 0) {
-        const bounds = this.pendingFit;
-        this.pendingFit = null;
-        this.map.fitBounds(bounds, { padding: [36, 36], maxZoom: 16 });
-      }
-    }).observe(element);
+    loadMapConfig().then((config) => {
+      const base = createBaseMap(element, config, { navigation: true });
+      if (!base) return;
+      this.map = base.map;
+      this.setIntersections(this.intersections);
+    });
   }
 
   /**
@@ -93,43 +87,61 @@ export class NetworkMap {
    * simulation each have their own list) and fits the view to them.
    */
   setIntersections(intersections) {
+    this.intersections = intersections;
     for (const marker of this.markers.values()) marker.remove();
+    this.tip.remove();
+    this.hovered = null;
     this.markers.clear();
     this.info.clear();
     this.keys.clear();
-    for (const ix of intersections) {
-      this.info.set(ix.id, { ...ix });
-      const marker = L.marker([ix.lat, ix.lng], {
-        icon: this._icon(ix.id),
-        title: ix.name,
-        keyboard: true,
-        riseOnHover: true,
-      });
-      marker.bindTooltip(tooltipHtml(this.info.get(ix.id)), { direction: 'top', offset: [0, -14], className: 'tl-tooltip' });
-      marker.on('click', () => this.onSelect(ix.id));
-      marker.addTo(this.map);
-      this.markers.set(ix.id, marker);
-    }
+    for (const ix of intersections) this.info.set(ix.id, { ...ix });
+    if (!this.map) return; // the map is not created yet: it calls this again when it is
+    const located = intersections.filter((ix) => Number.isFinite(ix.lat) && Number.isFinite(ix.lng));
+    for (const ix of located) this._addMarker(ix);
 
-    const bounds = L.latLngBounds(intersections.map((i) => [i.lat, i.lng]));
-    // A hidden container has no size: fitting now would pick a meaningless
-    // zoom. A container that was just shown has a size Leaflet has not read
-    // yet (its ResizeObserver runs later), so refresh it first.
-    if (this.element && this.element.clientWidth === 0) {
-      this.pendingFit = bounds;
-    } else {
-      this.map.invalidateSize();
-      this.map.fitBounds(bounds, { padding: [36, 36], maxZoom: 16 });
-    }
+    if (!located.length) return; // none has a surveyed position: nothing to draw, the map keeps its view
+    this._fit(located);
   }
 
-  _icon(id) {
-    const info = this.info.get(id);
-    return L.divIcon({
-      className: 'tl-marker-wrap',
-      html: markerHtml(info, id === this.selectedId),
-      iconSize: [0, 0],
+  _addMarker(ix) {
+    const el = document.createElement('div');
+    el.className = 'tl-marker-wrap';
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+    el.setAttribute('aria-label', ix.name);
+    el.innerHTML = markerHtml(this.info.get(ix.id), ix.id === this.selectedId);
+    const show = () => {
+      this.hovered = ix.id;
+      this.tip.setLngLat([ix.lng, ix.lat]).setHTML(tooltipHtml(this.info.get(ix.id))).addTo(this.map);
+    };
+    const hide = () => { if (this.hovered === ix.id) { this.hovered = null; this.tip.remove(); } };
+    el.addEventListener('mouseenter', show);
+    el.addEventListener('mouseleave', hide);
+    el.addEventListener('focus', show);
+    el.addEventListener('blur', hide);
+    el.addEventListener('click', (e) => { e.stopPropagation(); this.onSelect(ix.id); });
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.onSelect(ix.id); }
     });
+    this.markers.set(ix.id, new Marker({ element: el, anchor: 'center' }).setLngLat([ix.lng, ix.lat]).addTo(this.map));
+  }
+
+  /** A hidden container has no size: the map is resized and fitted once it has one. */
+  _fit(located) {
+    const lngs = located.map((i) => i.lng);
+    const lats = located.map((i) => i.lat);
+    const bounds = [[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]];
+    const fit = () => {
+      this.map.resize();
+      this.map.fitBounds(bounds, { padding: 36, maxZoom: 16, duration: 0 });
+    };
+    if (this.element.clientWidth > 0) { fit(); return; }
+    const observer = new ResizeObserver(() => {
+      if (this.element.clientWidth === 0) return;
+      observer.disconnect();
+      fit();
+    });
+    observer.observe(this.element);
   }
 
   _refresh(id) {
@@ -137,16 +149,18 @@ export class NetworkMap {
     const key = [info.dataMode, info.mode, info.greenDirection, info.signals && info.greenDirection ? info.signals[info.greenDirection] : '',
       info.summary ? info.summary.level : '', info.decisionState || '', id === this.selectedId].join('|');
     const marker = this.markers.get(id);
+    if (!marker) return; // no surveyed position: this intersection is not on the map
     // Tooltip text changes with every count; the icon only when its look does.
     const tip = tooltipHtml(info);
     if (tip !== info.tip) {
       info.tip = tip;
-      marker.setTooltipContent(tip);
+      if (this.hovered === id) this.tip.setHTML(tip);
     }
     if (this.keys.get(id) === key) return;
     this.keys.set(id, key);
-    marker.setIcon(this._icon(id));
-    marker.setZIndexOffset(id === this.selectedId ? 1000 : 0);
+    const el = marker.getElement();
+    el.innerHTML = markerHtml(info, id === this.selectedId);
+    el.style.zIndex = id === this.selectedId ? '10' : '';
   }
 
   update(snapshot) {
@@ -203,9 +217,9 @@ export class NetworkMap {
     if (prev && this.info.has(prev)) this._refresh(prev);
     if (this.info.has(id)) {
       this._refresh(id);
-      if (pan) {
-        const { lat, lng } = this.info.get(id);
-        if (!this.map.getBounds().pad(-0.15).contains([lat, lng])) this.map.panTo([lat, lng]);
+      const { lat, lng } = this.info.get(id);
+      if (pan && this.map && Number.isFinite(lat) && Number.isFinite(lng) && !this.map.getBounds().contains([lng, lat])) {
+        this.map.easeTo({ center: [lng, lat], duration: 300 });
       }
     }
   }

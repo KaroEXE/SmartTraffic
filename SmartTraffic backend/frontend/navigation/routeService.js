@@ -1,54 +1,41 @@
 import { NAV_CONFIG } from './config.js';
 import { isValidLatLng } from './geo.js';
-import { isUsefulAlternative, viaCandidates } from './routeRanking.js';
 
 /**
- * Route planning. Road-following routes come from OSRM; a straight line is
- * never used as a route. When `trafficRoutesUrl` is configured, the backend
- * is asked first for traffic-adjusted routes and OSRM is the fallback.
- *
- * OSRM returns at most a few alternatives. findMoreRoutes() asks the same
- * OSRM server for more through via points beside the direct line, one
- * request at a time (the public server allows about one per second), and
- * keeps only routes on different roads (routeRanking.isUsefulAlternative).
+ * Route planning through the SmartTraffic backend (POST /api/v1/routes), which
+ * asks the routing provider. A straight line is never used as a route. The page never talks
+ * to the map provider itself.
  *
  * Normalised route:
- *   { id, index, source: 'osrm' | 'backend', coordinates: [[lat, lng]...],
- *     distance (m), duration (s, base estimate), summary,
- *     traffic: null | { adjustedDuration, delay, basis: 'live-ai', updatedAt, alerts: [{ message }] } }
+ *   { id, index, source: 'backend', coordinates: [[lat, lng]...],
+ *     distance (m), duration (s, the provider's free-flow estimate), summary,
+ *     traffic: null }
  *
- * `traffic` is non-null only when the backend supplied a valid adjustment.
+ * `traffic` stays null: live AI delays are added in the browser from the live
+ * feed (routeRanking.estimateRoute), which is fresher than the answer of a
+ * request, and the two must not be counted twice.
  */
 
 export class RouteError extends Error {
   constructor(code, message) {
     super(message);
     this.name = 'RouteError';
-    this.code = code; // invalid-input | no-route | provider | network | timeout | offline | aborted
+    this.code = code; // invalid-input | no-route | provider | busy | network | timeout | offline | aborted
   }
 }
 
-const OSRM_MESSAGES = {
-  NoRoute: 'No drivable route was found between these points.',
-  NoSegment: 'One of the points is too far from any road. Choose a point on or near a road.',
-  InvalidValue: 'The routing service rejected the coordinates.',
-  InvalidQuery: 'The routing service rejected the request.',
-  InvalidUrl: 'The routing service rejected the request.',
-  TooBig: 'The route request is too large for the routing service.',
+/** Backend error code -> [RouteError code, message for the driver]. */
+const BACKEND_ERRORS = {
+  NO_ROUTE: ['no-route', 'No drivable route was found between these points.'],
+  POINT_NOT_ROUTABLE: ['no-route', 'One of the points is too far from any road. Choose a point on or near a road.'],
+  INVALID_REQUEST: ['invalid-input', 'The route request was not accepted. Check the start and destination.'],
+  RATE_LIMITED: ['busy', 'Too many route requests. Wait a moment and try again.'],
+  PROVIDER_BUSY: ['busy', 'The routing service is busy. Try again shortly.'],
+  PROVIDER_QUOTA_EXCEEDED: ['busy', 'The routing quota for today is used up. Try again later.'],
+  FEATURE_DISABLED: ['provider', 'Routing is not set up on this server.'],
+  PROVIDER_AUTH_FAILED: ['provider', 'Routing is not set up correctly on this server.'],
+  PROVIDER_TIMEOUT: ['timeout', 'The routing service did not answer in time.'],
 };
-
-export function buildOsrmUrl(start, destination, cfg = NAV_CONFIG.routing, { via = null } = {}) {
-  const points = via ? [start, via, destination] : [start, destination];
-  const coords = points.map((p) => `${p.lng},${p.lat}`).join(';');
-  const params = new URLSearchParams({
-    // A route through a via point is one specific route: no alternatives.
-    alternatives: via ? 'false' : String(Math.max(0, cfg.maxRoutes - 1)),
-    overview: 'full',
-    geometries: 'geojson',
-    steps: 'true', // needed for the road-name summary; steps themselves are not kept
-  });
-  return `${cfg.osrmUrl.replace(/\/$/, '')}/route/v1/${cfg.profile}/${coords}?${params}`;
-}
 
 function lineToLatLngs(geometry) {
   if (!geometry || geometry.type !== 'LineString' || !Array.isArray(geometry.coordinates)) return null;
@@ -60,74 +47,31 @@ function lineToLatLngs(geometry) {
   return out.length >= 2 ? out : null;
 }
 
-/**
- * A backend traffic adjustment is accepted only when it is complete and
- * explicitly based on live AI observations; anything else is ignored.
- */
-export function validTrafficAdjustment(traffic, baseDuration) {
-  if (!traffic || typeof traffic !== 'object') return null;
-  const { adjustedDuration, basis, updatedAt } = traffic;
-  if (basis !== 'live-ai') return null;
-  if (!Number.isFinite(adjustedDuration) || adjustedDuration < 0) return null;
-  if (!Number.isFinite(Date.parse(updatedAt))) return null;
-  const delay = Number.isFinite(traffic.delay) ? traffic.delay : adjustedDuration - baseDuration;
-  const alerts = Array.isArray(traffic.alerts)
-    ? traffic.alerts.filter((a) => a && typeof a.message === 'string' && a.message.trim()).map((a) => ({ message: a.message.trim() }))
-    : [];
-  return { adjustedDuration, delay, basis, updatedAt, alerts };
-}
-
-function normalizeRoute(raw, index, source) {
-  const coordinates = lineToLatLngs(raw.geometry);
+function normalizeRoute(raw, index) {
+  const coordinates = lineToLatLngs(raw && raw.geometry);
   if (!coordinates || !Number.isFinite(raw.distance) || !Number.isFinite(raw.duration)) return null;
-  const summary = typeof raw.summary === 'string'
-    ? raw.summary
-    // A route through a via point has two legs; name each road once.
-    : Array.isArray(raw.legs)
-      ? [...new Set(raw.legs.flatMap((l) => (l && l.summary ? l.summary.split(', ') : [])))].join(', ')
-      : '';
   return {
-    id: `${source}-${index}`,
+    id: `backend-${index}`,
     index,
-    source,
+    source: 'backend',
     coordinates,
     distance: raw.distance,
     duration: raw.duration,
-    summary,
-    traffic: source === 'backend' ? validTrafficAdjustment(raw.traffic, raw.duration) : null,
+    summary: typeof raw.summary === 'string' ? raw.summary : '',
+    traffic: null,
   };
 }
 
-/** OSRM JSON -> { routes, snapWarnings } or throws RouteError. */
-export function normalizeOsrmResponse(json, cfg = NAV_CONFIG.routing) {
-  if (!json || typeof json !== 'object') throw new RouteError('provider', 'The routing service returned an unreadable answer.');
-  if (json.code !== 'Ok') {
-    const code = json.code === 'NoRoute' || json.code === 'NoSegment' ? 'no-route' : 'provider';
-    throw new RouteError(code, OSRM_MESSAGES[json.code] || 'The routing service could not plan this route.');
-  }
-  const routes = (json.routes || [])
-    .slice(0, cfg.maxRoutes)
-    .map((r, i) => normalizeRoute(r, i, 'osrm'))
-    .filter(Boolean);
-  if (!routes.length) throw new RouteError('no-route', OSRM_MESSAGES.NoRoute);
-
-  const snapWarnings = [];
-  (json.waypoints || []).forEach((w, i) => {
-    if (w && Number.isFinite(w.distance) && w.distance > cfg.snapWarningMeters) {
-      snapWarnings.push(`${i === 0 ? 'Start' : 'Destination'} is ${Math.round(w.distance)} m from the nearest road; the route starts from that road.`);
-    }
-  });
+/** Backend JSON { routes, snapWarnings } -> { routes, snapWarnings }, or null when no route is usable. */
+export function normalizeBackendResponse(json, cfg = NAV_CONFIG.routing) {
+  if (!json || !Array.isArray(json.routes)) return null;
+  const routes = json.routes.slice(0, cfg.maxRoutes).map((r, i) => normalizeRoute(r, i)).filter(Boolean);
+  if (!routes.length) return null;
+  const snapWarnings = Array.isArray(json.snapWarnings) ? json.snapWarnings.filter((w) => typeof w === 'string') : [];
   return { routes, snapWarnings };
 }
 
-/** Backend JSON { routes: [...] } -> routes, or null when unusable. */
-export function normalizeBackendResponse(json, cfg = NAV_CONFIG.routing) {
-  if (!json || !Array.isArray(json.routes)) return null;
-  const routes = json.routes.slice(0, cfg.maxRoutes).map((r, i) => normalizeRoute(r, i, 'backend')).filter(Boolean);
-  return routes.length ? routes : null;
-}
-
-async function fetchJson(url, init, { signal, timeoutMs }) {
+async function postJson(url, body, { signal, timeoutMs }) {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     throw new RouteError('offline', 'You are offline. Routing needs an internet connection.');
   }
@@ -140,38 +84,25 @@ async function fetchJson(url, init, { signal, timeoutMs }) {
   let timedOut = false;
   const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   try {
-    const res = await fetch(url, { ...init, signal: controller.signal });
+    const res = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal,
+    });
     let json = null;
-    try { json = await res.json(); } catch { /* handled below */ }
+    try { json = await res.json(); } catch { /* handled by the caller */ }
     return { res, json };
-  } catch (err) {
+  } catch {
     if (timedOut) throw new RouteError('timeout', 'The routing service did not answer in time.');
     if (signal && signal.aborted) throw new RouteError('aborted', 'Request cancelled.');
-    throw new RouteError('network', 'The routing service could not be reached.');
+    throw new RouteError('network', 'SmartTraffic could not be reached.');
   } finally {
     clearTimeout(timer);
     if (signal) signal.removeEventListener('abort', onAbort);
   }
 }
 
-async function fetchOsrm(start, destination, signal, cfg) {
-  const { res, json } = await fetchJson(buildOsrmUrl(start, destination, cfg), {}, { signal, timeoutMs: cfg.timeoutMs });
-  if (!json) throw new RouteError('provider', `The routing service returned an error (HTTP ${res.status}).`);
-  return normalizeOsrmResponse(json, cfg);
-}
-
-async function fetchBackend(start, destination, signal, cfg) {
-  const { res, json } = await fetchJson(cfg.trafficRoutesUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ start, destination, maxRoutes: cfg.maxRoutes }),
-  }, { signal, timeoutMs: cfg.timeoutMs });
-  return res.ok ? normalizeBackendResponse(json, cfg) : null;
-}
-
 /**
  * Plans routes between two points.
- * Resolves { routes, snapWarnings, trafficRouting: 'backend' | 'unavailable' | 'not-configured' }.
+ * Resolves { routes, snapWarnings } or throws RouteError.
  */
 export async function planRoutes(start, destination, { signal, cfg = NAV_CONFIG.routing } = {}) {
   if (!isValidLatLng(start) || !isValidLatLng(destination)) {
@@ -180,98 +111,25 @@ export async function planRoutes(start, destination, { signal, cfg = NAV_CONFIG.
   if (start.lat === destination.lat && start.lng === destination.lng) {
     throw new RouteError('invalid-input', 'Start and destination are the same point.');
   }
+  const { res, json } = await postJson(cfg.url, {
+    start: { lat: start.lat, lng: start.lng },
+    destination: { lat: destination.lat, lng: destination.lng },
+    maxRoutes: cfg.maxRoutes,
+  }, { signal, timeoutMs: cfg.timeoutMs });
 
-  if (cfg.trafficRoutesUrl) {
-    try {
-      const routes = await fetchBackend(start, destination, signal, cfg);
-      if (routes) return { routes, snapWarnings: [], trafficRouting: 'backend' };
-    } catch (err) {
-      if (err.code === 'aborted' || err.code === 'offline') throw err;
-    }
-    const osrm = await fetchOsrm(start, destination, signal, cfg);
-    return { ...osrm, trafficRouting: 'unavailable' };
+  if (!res.ok) {
+    const known = json && BACKEND_ERRORS[json.code];
+    if (known) throw new RouteError(known[0], known[1]);
+    throw new RouteError('provider', `The routing service returned an error (HTTP ${res.status}).`);
   }
-  const osrm = await fetchOsrm(start, destination, signal, cfg);
-  return { ...osrm, trafficRouting: 'not-configured' };
+  const result = normalizeBackendResponse(json, cfg);
+  if (!result) throw new RouteError('no-route', 'No drivable route was found between these points.');
+  return result;
 }
 
-const sleep = (ms, signal) => new Promise((resolve, reject) => {
-  const timer = setTimeout(resolve, ms);
-  if (signal) {
-    signal.addEventListener('abort', () => {
-      clearTimeout(timer);
-      reject(new RouteError('aborted', 'Request cancelled.'));
-    }, { once: true });
-  }
-});
-
-/**
- * Adds real alternatives until there are `cfg.maxRoutes` routes, using OSRM
- * routes through via points (see the module comment). Each via point is
- * first moved onto a nearby named road (OSRM nearest), so the route passes
- * along a street instead of detouring into a service way; if that route
- * still doubles back, the next road near the same point is tried.
- * Requests are spaced `cfg.minIntervalMs` apart and stop as soon as enough
- * routes are found.
- * `onRoute(route)` is called for each accepted route. Resolves with the
- * accepted routes; failures of single candidates are skipped, never faked.
- */
-export function buildOsrmNearestUrl(point, cfg = NAV_CONFIG.routing) {
-  return `${cfg.osrmUrl.replace(/\/$/, '')}/nearest/v1/${cfg.profile}/${point.lng},${point.lat}?number=10`;
-}
-
-/**
- * Roads near a via point, nearest first, one per road name (OSRM nearest).
- * Unnamed ways (service roads, parking aisles) are skipped: a route through
- * them usually goes out and back.
- */
-async function nearbyRoads(point, signal, cfg) {
-  const { json } = await fetchJson(buildOsrmNearestUrl(point, cfg), {}, { signal, timeoutMs: cfg.timeoutMs });
-  const waypoints = json && json.code === 'Ok' && Array.isArray(json.waypoints) ? json.waypoints : [];
-  const seen = new Set();
-  const roads = [];
-  for (const w of waypoints) {
-    const name = w && typeof w.name === 'string' ? w.name.trim() : '';
-    if (!name || seen.has(name) || !Array.isArray(w.location)) continue;
-    seen.add(name);
-    roads.push({ lat: w.location[1], lng: w.location[0] });
-  }
-  return roads;
-}
-
-export async function findMoreRoutes(start, destination, existing, { signal, cfg = NAV_CONFIG.routing, onRoute = () => {} } = {}) {
-  const found = [];
-  const all = () => [...existing, ...found];
-  const candidates = viaCandidates(start, destination).slice(0, cfg.maxViaRequests);
-  for (let k = 0; k < candidates.length && all().length < cfg.maxRoutes; k += 1) {
-    try {
-      await sleep(cfg.minIntervalMs, signal);
-      const roads = (await nearbyRoads(candidates[k], signal, cfg)).slice(0, cfg.roadsPerVia);
-      // The nearest named road first; the next one only if that route is unusable.
-      for (const via of roads) {
-        await sleep(cfg.minIntervalMs, signal);
-        const { res, json } = await fetchJson(buildOsrmUrl(start, destination, cfg, { via }), {}, { signal, timeoutMs: cfg.timeoutMs });
-        if (!res.ok || !json || json.code !== 'Ok' || !json.routes || !json.routes[0]) continue;
-        const route = normalizeRoute(json.routes[0], existing.length + found.length, 'osrm');
-        if (route && isUsefulAlternative(route, all())) {
-          route.id = `osrm-via-${k}`;
-          found.push(route);
-          onRoute(route);
-          break;
-        }
-      }
-    } catch (err) {
-      if (err.code === 'aborted' || err.code === 'offline') throw err;
-    }
-  }
-  return found;
-}
-
-/** Effective duration for ranking: adjusted only when every route has a valid adjustment. */
+/** Effective duration for ranking: the provider's estimate; live delays are added by routeRanking. */
 export function rankRoutes(routes) {
-  const allAdjusted = routes.length > 0 && routes.every((r) => r.traffic);
-  const time = (r) => (allAdjusted ? r.traffic.adjustedDuration : r.duration);
   let fastest = null;
-  for (const r of routes) if (!fastest || time(r) < time(fastest)) fastest = r;
-  return { fastestId: fastest ? fastest.id : null, basis: allAdjusted ? 'live-ai' : 'base' };
+  for (const r of routes) if (!fastest || r.duration < fastest.duration) fastest = r;
+  return { fastestId: fastest ? fastest.id : null, basis: 'base' };
 }

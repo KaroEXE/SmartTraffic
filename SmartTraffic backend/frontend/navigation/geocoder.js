@@ -2,11 +2,9 @@ import { NAV_CONFIG } from './config.js';
 import { isValidLatLng } from './geo.js';
 
 /**
- * Destination search via Nominatim (OpenStreetMap).
- *
- * Nominatim's usage policy allows at most one request per second and no
- * search-as-you-type, so searches run on submit only and are spaced at least
- * `minIntervalMs` apart.
+ * Destination search through the SmartTraffic backend
+ * (GET /api/v1/places/search), which asks the search provider. Searches run on submit, not
+ * on every key, and the backend caches answers and limits requests per client.
  *
  * Place: { id, name, address, lat, lng }
  */
@@ -14,77 +12,38 @@ import { isValidLatLng } from './geo.js';
 export class GeocodeError extends Error {
   constructor(code, message) {
     super(message);
-    this.code = code; // too-short | offline | network | timeout | provider | aborted
+    this.code = code; // too-short | offline | network | timeout | provider | busy | aborted
   }
 }
 
-/** Nominatim jsonv2 results -> Place[]. */
-export function parseNominatim(json) {
-  if (!Array.isArray(json)) return [];
+/** Backend answer { places: [...] } -> Place[]. Entries without a usable position are skipped. */
+export function parsePlaces(json) {
+  if (!json || !Array.isArray(json.places)) return [];
   const out = [];
-  for (const r of json) {
-    const lat = Number.parseFloat(r.lat);
-    const lng = Number.parseFloat(r.lon);
-    if (!isValidLatLng({ lat, lng })) continue;
-    const display = typeof r.display_name === 'string' ? r.display_name : '';
-    const name = (typeof r.name === 'string' && r.name) || display.split(',')[0] || 'Unnamed place';
-    out.push({ id: `${r.osm_type || 'x'}-${r.osm_id || out.length}`, name, address: display, lat, lng });
+  for (const p of json.places) {
+    if (!p || typeof p.lat !== 'number' || typeof p.lng !== 'number' || !isValidLatLng({ lat: p.lat, lng: p.lng })) continue;
+    const name = typeof p.name === 'string' && p.name.trim() ? p.name.trim() : null;
+    if (!name) continue;
+    out.push({
+      id: typeof p.id === 'string' ? p.id : `place-${out.length}`,
+      name,
+      address: typeof p.address === 'string' ? p.address : '',
+      lat: p.lat,
+      lng: p.lng,
+    });
   }
   return out;
 }
 
-/**
- * Search area around the map view, at least `minSpanDeg` wide so a zoomed-in
- * map still searches the surrounding city.
- */
-export function localSearchBox(viewbox, minSpanDeg) {
-  const lat = (viewbox.north + viewbox.south) / 2;
-  const lng = (viewbox.east + viewbox.west) / 2;
-  const halfLat = Math.max(viewbox.north - viewbox.south, minSpanDeg) / 2;
-  const halfLng = Math.max(viewbox.east - viewbox.west, minSpanDeg) / 2;
-  return {
-    south: Math.max(-90, lat - halfLat),
-    north: Math.min(90, lat + halfLat),
-    west: Math.max(-180, lng - halfLng),
-    east: Math.min(180, lng + halfLng),
-  };
-}
+const BUSY_CODES = new Set(['RATE_LIMITED', 'PROVIDER_BUSY', 'PROVIDER_QUOTA_EXCEEDED']);
 
 export function createGeocoder(cfg = NAV_CONFIG.geocoding) {
-  let lastRequestAt = 0;
   let controller = null;
-
-  async function request(q, box, bounded, signal) {
-    const wait = lastRequestAt + cfg.minIntervalMs - Date.now();
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-    if (signal.aborted) throw new GeocodeError('aborted', 'Search cancelled.');
-    lastRequestAt = Date.now();
-
-    const params = new URLSearchParams({ format: 'jsonv2', q, limit: String(cfg.resultLimit), addressdetails: '0' });
-    if (box) params.set('viewbox', `${box.west},${box.north},${box.east},${box.south}`);
-    if (box && bounded) params.set('bounded', '1');
-    if (typeof navigator !== 'undefined' && navigator.language) params.set('accept-language', navigator.language);
-
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, cfg.timeoutMs);
-    try {
-      const res = await fetch(`${cfg.nominatimUrl.replace(/\/$/, '')}/search?${params}`, { signal });
-      if (!res.ok) throw new GeocodeError('provider', `Search service answered HTTP ${res.status}.`);
-      return parseNominatim(await res.json());
-    } catch (err) {
-      if (err instanceof GeocodeError) throw err;
-      if (timedOut) throw new GeocodeError('timeout', 'The search service did not answer in time.');
-      if (signal.aborted) throw new GeocodeError('aborted', 'Search cancelled.');
-      throw new GeocodeError('network', 'The search service could not be reached.');
-    } finally {
-      clearTimeout(timer);
-    }
-  }
 
   return {
     /**
-     * Searches near the map first (`viewbox` = { south, west, north, east }),
-     * then everywhere if nothing is found nearby.
+     * Searches by name, ranked towards the map view's centre (`viewbox` =
+     * { south, west, north, east }) when given.
      * Resolves { places, scope: 'local' | 'global' }.
      */
     async search(query, { viewbox } = {}) {
@@ -99,11 +58,32 @@ export function createGeocoder(cfg = NAV_CONFIG.geocoding) {
       controller = new AbortController();
       const { signal } = controller;
 
+      const params = new URLSearchParams({ q, limit: String(cfg.resultLimit) });
       if (viewbox) {
-        const local = await request(q, localSearchBox(viewbox, cfg.localSpanDeg), true, signal);
-        if (local.length) return { places: local, scope: 'local' };
+        params.set('lat', String((viewbox.north + viewbox.south) / 2));
+        params.set('lng', String((viewbox.east + viewbox.west) / 2));
       }
-      return { places: await request(q, viewbox, false, signal), scope: 'global' };
+      if (typeof navigator !== 'undefined' && navigator.language) params.set('lang', navigator.language.split('-')[0]);
+
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; controller.abort(); }, cfg.timeoutMs);
+      try {
+        const res = await fetch(`${cfg.url}?${params}`, { signal });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          if (json && BUSY_CODES.has(json.code)) throw new GeocodeError('busy', 'The search service is busy. Try again in a moment.');
+          if (json && json.code === 'FEATURE_DISABLED') throw new GeocodeError('provider', 'Search is not set up on this server.');
+          throw new GeocodeError('provider', `The search service answered HTTP ${res.status}.`);
+        }
+        return { places: parsePlaces(json), scope: json && json.scope === 'local' ? 'local' : 'global' };
+      } catch (err) {
+        if (err instanceof GeocodeError) throw err;
+        if (timedOut) throw new GeocodeError('timeout', 'The search service did not answer in time.');
+        if (signal.aborted) throw new GeocodeError('aborted', 'Search cancelled.');
+        throw new GeocodeError('network', 'SmartTraffic could not be reached.');
+      } finally {
+        clearTimeout(timer);
+      }
     },
 
     cancel() {

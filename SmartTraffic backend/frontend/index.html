@@ -1,10 +1,11 @@
 <!doctype html>
 <html lang="en">
 <head>
+  <link rel="icon" href="data:,">
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Smart Traffic AI - Signal Operations</title>
-  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css">
   <link rel="stylesheet" href="style.css">
   <script type="importmap">
     {
@@ -68,7 +69,7 @@
       <section class="block block-map">
         <div class="block-head">
           <h2>Network map</h2>
-          <span class="meta">OpenStreetMap</span>
+          <span class="meta">OpenFreeMap</span>
         </div>
         <div class="map" id="map"></div>
       </section>
@@ -510,7 +511,6 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/vendor/leaflet/leaflet.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -1,108 +1,74 @@
 /**
- * Driver navigation configuration. Provider URLs and limits live here only;
- * UI modules never hard-code them. Every provider below is a public, keyless
- * service, so no secret is (or may ever be) stored in this file.
- *
- * The public OSM services have usage policies (rate limits, no bulk use, no
- * autocomplete on Nominatim). For production, point these at self-hosted or
- * commercial instances - see navigation/README.md.
+ * Driver navigation configuration. Limits and endpoints live here only; UI
+ * modules never hard-code them. No provider URL and no secret is stored in
+ * this file: the map style (OpenFreeMap) and the map area come from
+ * /api/client-config, place search and routing (Geoapify, or an own OSRM) from
+ * the SmartTraffic backend (/api/v1), which holds the credentials and the
+ * quota budget. See navigation/README.md.
  */
 export const NAV_CONFIG = Object.freeze({
   routing: {
-    // OSRM HTTP API (https://project-osrm.org/docs/v5.24.0/api/). The public
-    // demo server has no SLA and allows about one request per second.
-    osrmUrl: 'https://router.project-osrm.org',
-    profile: 'driving',
-    // Routes shown, ranked best to worst. OSRM's own alternatives come first;
-    // the rest are OSRM routes through via points (routeService.findMoreRoutes).
+    // POST /api/v1/routes: routes from the routing provider, in ranking order.
+    url: '/api/v1/routes',
+    // Routes shown, ranked best to worst. The backend returns the different
+    // routes it found (up to 3), at most this many are drawn.
     maxRoutes: 4,
-    // At most this many via points are tried per start/destination pair
-    // (two OSRM requests each: nearest road + route), every request spaced
-    // minIntervalMs apart (public OSRM: about one request per second).
-    maxViaRequests: 10,
-    // Roads tried per via point (each one route request) before moving on.
-    roadsPerVia: 2,
-    minIntervalMs: 1100,
-    timeoutMs: 15000,
-    // A start/destination snapped more than this far onto a road is reported.
-    snapWarningMeters: 300,
-    // Backend endpoint for traffic-adjusted routes. Not implemented yet; while
-    // null, routes come from OSRM and carry no live-traffic adjustment.
-    trafficRoutesUrl: null,
-    // Minimum time between backend re-evaluations triggered by traffic updates.
-    trafficRefreshMs: 30000,
+    timeoutMs: 25000,
   },
 
   geocoding: {
-    nominatimUrl: 'https://nominatim.openstreetmap.org',
+    // GET /api/v1/places/search
+    url: '/api/v1/places/search',
     resultLimit: 5,
     minQueryLength: 3,
-    // Nominatim policy: max 1 request/s and no search-as-you-type.
-    minIntervalMs: 1100,
-    timeoutMs: 10000,
-    // Searches first inside an area at least this wide (degrees, ~33 km)
-    // around the map view, then worldwide if nothing is found there.
-    localSpanDeg: 0.3,
-  },
-
-  hazards: {
-    // OpenStreetMap speed cameras and bumps through the backend's Overpass
-    // proxy (backend/routes/osmRoutes.js), which builds the query with
-    // buildOverpassQuery() and maxResults below. The Overpass instances it
-    // uses are OVERPASS_URLS in backend/.env.
-    osmUrl: '/api/osm/hazards',
-    minZoom: 13, // below this the visible area is too large to query
-    maxResults: 500,
-    // The backend tries each Overpass instance for up to 25 s.
-    timeoutMs: 55000,
-    retryAfterMs: 30000,
-    debounceMs: 700,
-  },
-
-  reports: {
-    // Drivers' reports approved on admin.html (backend GET /api/hazards).
-    backendUrl: '/api/hazards',
-    minZoom: 0, // a few hundred points at most, so any zoom
-    maxAgeMs: 60000, // reloaded once older, so newly approved reports appear
-    retryAfterMs: 30000,
-    debounceMs: 700,
+    timeoutMs: 15000,
   },
 
   roadFeatures: {
     // Speed cameras, bumps and closures entered by the operator (backend
-    // GET /api/v1/road-features, database only - works without OpenStreetMap).
+    // GET /api/v1/road-features, database only).
     url: '/api/v1/road-features',
-    minZoom: 12, // the endpoint refuses areas wider than 0.5 degrees
+    minZoom: 12,
+    maxSpanDeg: 0.45, // the endpoint refuses areas wider than 0.5 degrees
+    maxResults: 500,
     maxAgeMs: 60000,
+    timeoutMs: 15000,
+    retryAfterMs: 30000,
+    debounceMs: 700,
+  },
+
+  map: {
+    // The map is OpenFreeMap (vector tiles, no key). The style URL, the area the map is
+    // fixed to and the zoom range are served by GET /api/client-config.
+    clientConfigUrl: '/api/client-config',
+  },
+
+  reports: {
+    // Driver reports (accidents, jams, closures, roadworks, hazards) from the backend
+    // database: GET /api/v1/reports, POST /api/v1/reports.
+    url: '/api/v1/reports',
+    minZoom: 11,
+    maxSpanDeg: 0.45,
+    maxAgeMs: 30000, // new and expiring reports: look again after this long
+    descriptionMaxLength: 280, // the same as reportDescriptionMaxLength in GET /api/v1/config
+    timeoutMs: 15000,
     retryAfterMs: 30000,
     debounceMs: 700,
   },
 
   places: {
-    // Important places (placesService.js) through the same backend proxy.
-    osmUrl: '/api/osm/places',
-    maxResults: 300,
-    timeoutMs: 55000,
+    // Important places entered by the operator (hospitals, mosques, ...): GET /api/v1/places/local.
+    url: '/api/v1/places/local',
+    minZoom: 12,
+    maxSpanDeg: 0.45,
+    maxAgeMs: 120000,
+    timeoutMs: 15000,
+    retryAfterMs: 30000,
+    debounceMs: 700,
   },
 
-  map: {
-    // Same tile source as the operations dashboard (frontend/map.js).
-    tileUrl: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    maxZoom: 19,
-    // Only used when the intersection list cannot be loaded.
-    fallbackView: { lat: 35.5617, lng: 45.4329, zoom: 14 },
-    // Areas for an area picker: the whole Kurdistan Region (bounds
-    // [[south, west], [north, east]]) and its main cities (centre + zoom).
-    defaultRegion: 'kurdistan',
-    regions: [
-      { id: 'kurdistan', name: 'Kurdistan Region', bounds: [[34.4, 42.3], [37.4, 46.4]] },
-      { id: 'erbil', name: 'Erbil', lat: 36.1911, lng: 44.0092, zoom: 13 },
-      { id: 'sulaymaniyah', name: 'Sulaymaniyah', lat: 35.5617, lng: 45.4329, zoom: 13 },
-      { id: 'duhok', name: 'Duhok', lat: 36.8671, lng: 42.9885, zoom: 13 },
-      { id: 'halabja', name: 'Halabja', lat: 35.1778, lng: 45.9861, zoom: 14 },
-    ],
-  },
+  // Place of the device session used to post a report (localStorage key).
+  deviceStorageKey: 'hawr.deviceSession',
 
   traffic: {
     // An observation older than this is shown as stale even before the

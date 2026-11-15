@@ -79,11 +79,11 @@ export function formatImprovement(pct) {
   return `${pct > 0 ? '+' : '−'}${Math.abs(pct).toFixed(1)}%`;
 }
 
-/** How trustworthy a position is: 'surveyed', 'placeholder' or 'simulated'. */
+/** Where a position comes from: 'surveyed', 'unknown' (none) or 'simulated'. */
 export function positionLabel(intersection) {
   if (!intersection) return null;
   if (intersection.dataMode === 'simulation') return 'Simulated position';
   if (intersection.positionSource === 'surveyed') return null;
-  if (intersection.positionSource === 'placeholder') return 'Approximate position - not surveyed';
+  if (intersection.positionSource === 'unknown') return 'Position not surveyed - not shown on the map';
   return null;
 }

@@ -14,20 +14,13 @@ import { rankColor, rankLabel } from './routeRanking.js';
 
 const TYPE_LABEL = { ambulance: 'ambulance', police: 'police vehicle', fire_truck: 'fire truck' };
 
-const ROUTING_NOTE = {
-  'not-configured': 'Live traffic data unavailable for route times. Showing ordinary routing estimates (OpenStreetMap / OSRM).',
-  unavailable: 'Live traffic data unavailable: SmartTraffic could not adjust route times. Showing ordinary routing estimates.',
-  partial: 'Live traffic adjustments are available for some routes only, so routes are ranked by base estimate.',
-  backend: 'Times include live AI traffic adjustments from SmartTraffic.',
-};
-
 const STATUS_WORD = { live: 'live', stale: 'no recent data', 'no-data': 'no data yet', offline: 'last known' };
 
 // Whether the ranking includes live AI traffic right now (routeRanking.liveStatus).
 const LIVE_NOTE = {
-  included: 'Ranked by travel time: OSRM road times plus live AI traffic at the monitored intersection.',
-  unavailable: 'Live traffic isn’t included at the moment (no fresh AI data from the monitored intersection). Ranked by OSRM road travel time.',
-  'not-on-route': 'None of these routes passes the AI-monitored intersection, so they are ranked by OSRM road travel time.',
+  included: 'Ranked by travel time: road times plus live AI traffic at the monitored intersection.',
+  unavailable: 'Live traffic isn’t included at the moment (no fresh AI data from the monitored intersection). Ranked by road travel time (no live traffic).',
+  'not-on-route': 'None of these routes passes the AI-monitored intersection, so they are ranked by road travel time (no live traffic).',
 };
 
 function setText(el, text) {
@@ -43,7 +36,7 @@ function shortDelay(seconds) {
 function liveText(est) {
   const live = est.intersections.filter((i) => i.included);
   const missing = est.intersections.filter((i) => !i.included);
-  const parts = [`Road time ${formatDuration(est.baseDuration)} (OSRM)`];
+  const parts = [`Road time ${formatDuration(est.baseDuration)} (free-flow)`];
   for (const i of live) {
     const where = i.approach ? `, ${directionLabel(i.approach)} approach` : '';
     parts.push(`+${shortDelay(i.delay)} live traffic at ${i.name}${where} (${Math.round(i.vehicles)} vehicles)`);
@@ -138,11 +131,10 @@ export class RoutePanel {
    * Items are created once per route; rank() reorders and relabels them in
    * place when live traffic changes the estimates.
    */
-  showRoutes({ routes, selectedId, order, estimates, liveState, trafficRouting, snapWarnings, searching = false }) {
+  showRoutes({ routes, selectedId, order, estimates, liveState, snapWarnings }) {
     this.routes = routes;
     this.msgEl.hidden = true;
     this.clearSuggestion();
-    this.trafficRouting = trafficRouting;
 
     this.warnEl.innerHTML = (snapWarnings || []).map((w) => `<li>${escapeHtml(w)}</li>`).join('');
     this.warnEl.hidden = !snapWarnings || !snapWarnings.length;
@@ -151,16 +143,8 @@ export class RoutePanel {
     this.items = new Map();
     this.listEl.innerHTML = '';
     for (const r of routes) this._addItem(r);
-    this.rank({ order, estimates, liveState, searching });
+    this.rank({ order, estimates, liveState });
     this.select(selectedId);
-  }
-
-  /** A route that arrived after the first ones (extra alternative). */
-  addRoute(route, ranking) {
-    this.routes = [...this.routes, route];
-    this._addItem(route);
-    this.rank(ranking);
-    this.select(this.selectedId);
   }
 
   _addItem(r) {
@@ -189,7 +173,7 @@ export class RoutePanel {
   }
 
   /** Re-ranks in place: order, labels, colours, times. No element is rebuilt. */
-  rank({ order, estimates, liveState, searching = false }) {
+  rank({ order, estimates, liveState }) {
     this.order = order;
     order.forEach((id, position) => {
       const item = this.items.get(id);
@@ -208,9 +192,7 @@ export class RoutePanel {
     });
 
     let note = LIVE_NOTE[liveState] || LIVE_NOTE['not-on-route'];
-    if (this.trafficRouting === 'backend') note = ROUTING_NOTE.backend;
-    if (searching) note += ' Looking for more alternative routes...';
-    else if (order.length < 4) note += ` Only ${order.length} distinct route${order.length === 1 ? '' : 's'} found on different roads between these points.`;
+    if (order.length < 4) note += ` Only ${order.length} distinct route${order.length === 1 ? '' : 's'} found on different roads between these points.`;
     setText(this.noteEl, note);
     this.noteEl.className = `nv-note${liveState === 'included' ? ' nv-note-live' : ''}`;
     this.noteEl.hidden = false;

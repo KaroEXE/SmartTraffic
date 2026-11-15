@@ -5,12 +5,15 @@ import { RoutePanel } from './routePanel.js';
 import { SearchBox } from './searchBox.js';
 import { createStatus } from './status.js';
 import { createGeocoder } from './geocoder.js';
-import { planRoutes, findMoreRoutes, RouteError } from './routeService.js';
+import { planRoutes, RouteError } from './routeService.js';
 import { estimateRoute, orderRoutes, liveStatus } from './routeRanking.js';
 import { matchRouteToTraffic, findRerouteSuggestion } from './routeTraffic.js';
 import {
-  createOverpassProvider, createBackendProvider, createRoadFeatureProvider, createHazardLoader,
+  createRoadFeatureProvider, createReportProvider, createPlaceProvider, createHazardLoader,
 } from './hazardService.js';
+import { loadMapConfig, insideBounds } from '../mapConfig.js';
+import { createDeviceSession } from './deviceSession.js';
+import { ReportDialog } from './reportDialog.js';
 import { createTrafficStore } from './trafficStore.js';
 import { connectTrafficFeed, disconnectTrafficFeed, feedDiagnostics } from './trafficFeed.js';
 import { formatCoords } from './format.js';
@@ -34,15 +37,12 @@ const state = {
   order: [], // route ids, best first
   estimates: new Map(), // route id -> estimateRoute()
   liveState: 'not-on-route',
-  searching: false, // extra alternatives still being requested
-  trafficRouting: 'not-configured',
   snapWarnings: [],
   routeKey: null,
   routeController: null,
   matches: new Map(),
   seenAlerts: new Set(),
   dismissed: new Set(),
-  lastTrafficRefresh: 0,
 };
 
 let map;
@@ -51,7 +51,8 @@ let panel;
 let layers;
 let search;
 let status;
-// OpenStreetMap features and approved driver reports: { provider, loader, state }
+let mapArea = null; // the area the map is fixed to (Kurdistan Region), from /api/client-config
+// Operator road features (speed cameras, bumps, closures): { provider, loader, state }
 let hazardSources = [];
 let renderTimer = null;
 
@@ -69,7 +70,15 @@ function updateInsets() {
 
 // ---------------------------------------------------------- start point
 
+/** Search covers all of Iraq, the map only the Kurdistan Region: say so instead of showing nothing. */
+function warnIfOutside(point) {
+  if (mapArea && !insideBounds(mapArea, point)) {
+    status.notify('That place is outside the Kurdistan Region. The map is fixed to the region and cannot show it; routes still work.', { tone: 'warn', timeoutMs: 8000 });
+  }
+}
+
 function setStart(point, label) {
+  warnIfOutside(point);
   state.start = { point, label };
   map.setStart(point);
   $('nv-from-value').textContent = label;
@@ -78,6 +87,7 @@ function setStart(point, label) {
 }
 
 function setDestination(point, label) {
+  warnIfOutside(point);
   state.destination = { point, label };
   map.setDestination(point, label);
   requestRoutes();
@@ -113,6 +123,7 @@ function locate({ asStart }) {
     const point = { lat: pos.coords.latitude, lng: pos.coords.longitude };
     const accuracy = Math.round(pos.coords.accuracy || 0);
     map.showUserLocation(point, accuracy);
+    if (!asStart) warnIfOutside(point);
     if (asStart) setStart(point, `Your location${accuracy ? ` (within ${accuracy} m)` : ''}`);
     if (!asStart || !state.destination) map.fitPoints([[point.lat, point.lng]]);
   }, (err) => {
@@ -136,7 +147,6 @@ function clearRoutes() {
   state.userSelected = false;
   state.order = [];
   state.estimates = new Map();
-  state.searching = false;
   state.routeKey = null;
   state.matches = new Map();
   map.setRoutes([], null);
@@ -165,7 +175,7 @@ function rerank({ fresh = false } = {}) {
 }
 
 function ranking() {
-  return { order: state.order, estimates: state.estimates, liveState: state.liveState, searching: state.searching };
+  return { order: state.order, estimates: state.estimates, liveState: state.liveState };
 }
 
 function drawRoutes() {
@@ -191,11 +201,9 @@ async function requestRoutes({ force = false } = {}) {
     const result = await planRoutes(state.start.point, state.destination.point, { signal: controller.signal });
     if (controller.signal.aborted) return;
     state.routes = result.routes;
-    state.trafficRouting = result.trafficRouting;
     state.snapWarnings = result.snapWarnings;
     const kept = keepIndex !== undefined ? result.routes.find((r) => r.index === keepIndex) : null;
     state.userSelected = Boolean(kept && state.userSelected);
-    state.searching = !force && state.routes.length < cfg.routing.maxRoutes;
     rerank({ fresh: true });
     if (kept) state.selectedId = kept.id;
 
@@ -204,7 +212,6 @@ async function requestRoutes({ force = false } = {}) {
       routes: state.routes,
       selectedId: state.selectedId,
       ...ranking(),
-      trafficRouting: state.trafficRouting,
       snapWarnings: state.snapWarnings,
     });
     markCurrentAlertsSeen();
@@ -214,42 +221,12 @@ async function requestRoutes({ force = false } = {}) {
       updateInsets(); // the sheet just changed height; fit the route into the visible map
       map.fitRoutes(state.routes);
     }
-    if (state.searching) await addAlternatives(controller);
   } catch (err) {
     if (controller.signal.aborted || (err instanceof RouteError && err.code === 'aborted')) return;
     state.routeKey = null;
     if (force) return; // background refresh: keep showing the current routes
     panel.showMessage(err instanceof RouteError ? err.message : 'Route planning failed.', { tone: 'error', retry: err.code !== 'invalid-input' });
   }
-}
-
-/**
- * Fewer routes than wanted: ask the routing service for real alternatives
- * through via points (spaced to respect its rate limit) and add each one as
- * it arrives. Stops when enough are found or the route request changes.
- */
-async function addAlternatives(controller) {
-  try {
-    await findMoreRoutes(state.start.point, state.destination.point, state.routes, {
-      signal: controller.signal,
-      onRoute: (route) => {
-        if (controller.signal.aborted) return;
-        state.routes = [...state.routes, route];
-        rerank({ fresh: true });
-        drawRoutes();
-        panel.addRoute(route, ranking());
-        panel.select(state.selectedId);
-      },
-    });
-  } catch (err) {
-    if (controller.signal.aborted || (err instanceof RouteError && err.code === 'aborted')) return;
-  }
-  if (controller.signal.aborted) return;
-  state.searching = false;
-  panel.rank(ranking());
-  computeMatches();
-  panel.updateTraffic(state.matches);
-  map.fitRoutes(state.routes);
 }
 
 function selectRoute(id) {
@@ -316,12 +293,6 @@ function renderTraffic() {
     panel.showSuggestion(suggestion);
     if (suggestion.alert) state.seenAlerts.add(suggestion.alert.key);
   }
-
-  // Backend-evaluated routes are refreshed when traffic changes (throttled).
-  if (state.trafficRouting === 'backend' && Date.now() - state.lastTrafficRefresh > cfg.routing.trafficRefreshMs) {
-    state.lastTrafficRefresh = Date.now();
-    requestRoutes({ force: true });
-  }
 }
 
 async function loadIntersections() {
@@ -333,13 +304,13 @@ async function loadIntersections() {
     const pts = intersections.filter((i) => Number.isFinite(i.lat) && Number.isFinite(i.lng)).map((i) => [i.lat, i.lng]);
     if (pts.length && !state.routes.length) map.fitPoints(pts, 15);
   } catch {
-    // The map stays on the configured fallback view; routing still works.
+    // The map stays on its first view (the default region); routing still works.
   }
 }
 
 // -------------------------------------------------------------- hazards
 
-const HAZARD_IDS = ['speed_camera', 'speed_bump', 'road_closure'];
+const HAZARD_IDS = ['speed_camera', 'speed_bump', 'road_closure', 'report', 'place'];
 
 const inView = (bbox, h) => bboxContains(bbox, { south: h.lat, north: h.lat, west: h.lng, east: h.lng });
 const sourcesOf = (id) => hazardSources.filter((s) => s.provider.kinds.includes(id));
@@ -392,13 +363,28 @@ function onLayerToggle(id, visible) {
 
 // ----------------------------------------------------------------- boot
 
-function boot() {
+async function boot() {
   if (window.smartTrafficNav) return; // one page, one app instance
   status = createStatus({ banner: $('nv-offline'), toast: $('nv-toast') });
   store = createTrafficStore({ staleAfterSeconds: cfg.traffic.staleAfterSeconds });
+  // The OpenFreeMap style URL, the area the map is fixed to and its zoom range come from the backend.
+  const mapConfig = await loadMapConfig(cfg.map.clientConfigUrl);
+  mapArea = mapConfig ? mapConfig.map.bounds : null;
+  const device = createDeviceSession(cfg.deviceStorageKey);
+  const reportDialog = new ReportDialog({
+    dialog: $('nv-report'),
+    maxLength: cfg.reports.descriptionMaxLength,
+    onSubmit: async ({ type, description, point }) => {
+      await device.postReport({ type, description, lat: point.lat, lng: point.lng });
+      status.notify('Thank you. Your report is on the map.', { tone: 'ok' });
+      for (const s of hazardSources) if (s.provider.kinds.includes('report')) s.loader.retry(map.getView());
+    },
+  });
 
   map = new NavMap($('nv-map'), {
+    mapConfig,
     onPointChosen: (kind, point) => {
+      if (kind === 'report') { reportDialog.open(point); return; }
       const label = `Map point ${formatCoords(point)}`;
       if (kind === 'start') setStart(point, label);
       else { search.setValue(label); setDestination(point, label); }
@@ -408,9 +394,9 @@ function boot() {
   });
 
   hazardSources = [
-    [createOverpassProvider(cfg.hazards), cfg.hazards],
-    [createBackendProvider(cfg.reports), cfg.reports],
     [createRoadFeatureProvider(cfg.roadFeatures), cfg.roadFeatures],
+    [createReportProvider(cfg.reports), cfg.reports],
+    [createPlaceProvider(cfg.places), cfg.places],
   ].map(([provider, sourceCfg]) => {
     const source = { provider, state: { status: 'idle', hazards: [] } };
     source.loader = createHazardLoader({
@@ -445,6 +431,7 @@ function boot() {
     input: $('nv-dest'),
     results: $('nv-results'),
     message: $('nv-search-msg'),
+    attribution: $('nv-results-attrib'),
     geocoder: createGeocoder(),
     getViewbox: () => map.getView().bbox,
     onSelect: (place) => setDestination({ lat: place.lat, lng: place.lng }, place.name),
@@ -501,4 +488,8 @@ function boot() {
   });
 }
 
-boot();
+boot().catch((err) => {
+  console.error('Navigation page failed to start', err);
+  const box = document.getElementById('nv-toast');
+  if (box) box.textContent = 'The navigation page could not start. Reload the page.';
+});

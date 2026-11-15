@@ -1,142 +1,72 @@
-# Driver navigation (`/navigation.html`)
+# Driver navigation page
 
-Mobile-first driver page, separate from the operator dashboard. Opened from
-the dashboard topbar (navigation arrow next to "Live AI") or directly at
-`http://<host>:<port>/navigation.html`. No build step, no extra dependencies:
-it uses the Leaflet and Socket.IO client files the backend already serves.
+`navigation.html` is a phone-first page for drivers: search a destination, see ranked
+routes with time and distance, see where the AI cameras report live traffic, and report an incident. It is plain
+ES modules served by the backend (no build step) and talks **only to the SmartTraffic
+backend**, never to the map provider.
+
+```
+ navigation.html -> navApp.js
+   NavMap (MapLibre + OpenFreeMap)      /api/client-config   map style URL, area, attribution
+   SearchBox / geocoder.js              GET  /api/v1/places/search
+   routeService.js                      POST /api/v1/routes
+   hazardService.js                     GET  /api/v1/road-features, /api/v1/reports, /api/v1/places/local
+   deviceSession.js, reportDialog.js    POST /api/v1/auth/device, POST /api/v1/reports
+   trafficStore / trafficFeed           Socket.IO "live" room + GET /api/intersections
+```
+
+## Modules
 
 | File | Role |
 |---|---|
-| `../navigation.html` | Page layout |
-| `navigation.css` | Mobile-first styles (`nv-` prefix; colour tokens from `../style.css`) |
-| `navApp.js` | Entry point: wires everything, one instance per page |
-| `config.js` | **All provider URLs and limits** |
-| `navMap.js`, `layersPanel.js` | Leaflet map, layers, legend |
-| `searchBox.js`, `geocoder.js` | Destination search (Nominatim) |
-| `routeService.js`, `routePanel.js`, `routeTraffic.js` | Routing (OSRM), route sheet, route vs. live observations |
-| `routeRanking.js` | Four routes ranked best to worst: live delay estimate, ordering, distinct-route checks |
-| `trafficFeed.js`, `trafficStore.js` | Socket.IO subscription (live room only) and freshness |
-| `hazardService.js` | Speed cameras / bumps / closures, replaceable provider |
-| `status.js`, `format.js`, `geo.js` | Offline/notices, formatting, geometry |
-| `manifest.webmanifest`, `icon.svg` | PWA metadata (no service worker yet, so no offline mode) |
+| `navApp.js` | Wires the page: map, search, routes, live feed, layers |
+| `navMap.js` | MapLibre map, created once: routes, hazards, reports and places as GeoJSON layers (updated with `setData`), intersection markers, point picker. Intersections without a position are not drawn. |
+| `../mapCore.js`, `../mapConfig.js` | Shared by every web map: load the style URL, area and attribution from the backend, create the map, add the icons, show a message when the map cannot load |
+| `config.js` | Endpoints and limits. No provider URL, no key. |
+| `searchBox.js`, `geocoder.js` | Destination search through the backend |
+| `routeService.js`, `routePanel.js` | Route request, normalisation to `[lat, lng]` lines, the route sheet |
+| `routeRanking.js`, `routeTraffic.js` | Ranking by provider time plus live AI delay; matching routes to monitored intersections |
+| `hazardService.js`, `layersPanel.js` | Speed cameras, bumps and closures entered by the operator, driver reports, Hawr places; layer switches |
+| `deviceSession.js`, `reportDialog.js` | The anonymous device session (kept in localStorage) and the "Report an incident" dialog |
+| `trafficStore.js`, `trafficFeed.js` | Live intersection state from the backend |
+| `format.js`, `geo.js`, `status.js` | Helpers |
 
-Unit tests: `backend/test/navigation.test.js` and `backend/test/routeRanking.test.js` (`npm test` in `backend/`).
+## Routing
 
-## Four ranked routes
+- One `POST /api/v1/routes` asks the backend for up to four routes. The backend asks Geoapify once per route
+  type (or your own OSRM once) and returns the different routes it found, at most three from Geoapify;
+  fewer is normal and the list says so. A straight line is never drawn as a route.
+- Times are the provider's free-flow estimate. The page adds **live AI delay** at monitored
+  intersections from the live feed (`routeRanking.estimateRoute`): the mean wait of the stopped
+  vehicles on the approach the route enters by plus 2 s per vehicle. Intersections without fresh
+  data, without a camera video or without a surveyed position add nothing and are listed as such.
+  Routes are re-ranked as live data changes (no new route request), with a 5 s tolerance so near
+  ties do not flip.
+- Backend errors are shown as readable messages (no route, point too far from a road, busy, quota,
+  offline, timeout) with a retry button where retrying can help.
 
-The page shows up to four routes between the same start and destination,
-ranked by estimated travel time (distance breaks ties) and drawn green
-(Route 1, best, on top) -> yellow-green -> orange -> red (Route 4, slowest).
-The route list is the legend: tapping an entry or a line highlights it.
+## Map
 
-- **Where they come from.** One OSRM request with alternatives. When OSRM
-  returns fewer than four, `findMoreRoutes` asks the same OSRM server for
-  routes through via points beside the direct line, each first moved onto a
-  nearby named road (`/nearest`). A candidate is kept only if it runs on
-  different roads (less than 80% shared with every other route), does not
-  double back, and is not more than 2.5x the fastest time. Requests are
-  spaced 1.1 s apart and stop once four routes exist. If the road network
-  offers fewer distinct routes, fewer are shown and the page says so.
-- **Estimate.** OSRM travel time plus, for each AI-monitored intersection
-  the route passes (within 60 m), a live delay for the approach the route
-  enters by: the mean wait of the stopped vehicles on that approach plus 2 s
-  per vehicle on it (`traffic.secondsPerVehicle`). This is the same live
-  data the backend broadcasts to the dashboard.
-- **Updates.** Every live update re-ranks from data already on the page; no
-  route is re-requested. Lines and list entries are recoloured and moved in
-  place. Two routes swap only when their estimates differ by more than 5 s
-  (`traffic.rankHysteresisSeconds`), so near-ties do not flicker.
-- **No live data** (feed stale, video unavailable, or no route passes the
-  intersection): ranking uses OSRM times only, and the note above the list
-  says live traffic is not included.
+The map is **OpenFreeMap** vector tiles drawn by **MapLibre GL JS**; the style URL, the area the map is fixed to
+(the Kurdistan Region) and the zoom range come from `GET /api/client-config`. No key is involved. Attribution is
+shown in the corner (OpenFreeMap's and "Powered by Geoapify"). If the style cannot be loaded, a message says so
+instead of a blank map. Labels are OpenStreetMap names: a place or street OpenStreetMap does not name has no label.
+Tap the map for "Start here", "Destination here" or "Report an incident here"; a report is posted with the
+browser's device session and appears on the map once the backend has stored it.
 
-## External providers (no keys, nothing secret in the frontend)
+## Data shown
 
-| Purpose | Default | Policy to respect |
+| Layer | Source | When empty |
 |---|---|---|
-| Map tiles | tile.openstreetmap.org (same as dashboard) | OSM tile usage policy, attribution shown |
-| Routing | router.project-osrm.org (OSRM demo) | Demo server, no SLA, ~1 request/s |
-| Search | nominatim.openstreetmap.org | Max 1 request/s, no search-as-you-type (search runs on submit) |
-| Hazards | Overpass API (OSM `highway=speed_camera`, `traffic_calming=bump/hump/yes/table/cushion`), fetched by the backend (`GET /api/osm/hazards`) | Public instances are often busy; the page says "unavailable" when they fail |
+| Monitored intersections | the live decision engine (AI cameras); only those with a surveyed position | "No monitored intersections with known positions" |
+| Speed cameras, bumps, closures | `GET /api/v1/road-features` (entered in the admin console) | "None in this area" |
+| Driver reports | `GET /api/v1/reports` (posted by drivers, shown until they expire) | "None in this area" |
+| Hawr places | `GET /api/v1/places/local` (entered in the admin console) | "None in this area" |
 
-For production, point `config.js` (and `OVERPASS_URLS` in `backend/.env`)
-at self-hosted or commercial instances. OpenStreetMap hazard data is
-community-mapped, often incomplete, and shown as "not verified by
-SmartTraffic".
+Nothing is invented: counts without a camera are `-`, never 0; a stale observation says so.
 
-**Driver reports** (speed cameras, speed bumps, road closures) come from
-the backend's `GET /api/hazards`: reports sent to `POST /api/hazards/reports`
-appear on the map only after an administrator approves them on
-`/admin.html` (password: `ADMIN_TOKEN` in `backend/.env`). They are loaded at
-any zoom and reloaded every minute (`reports` in `config.js`).
+## Tests
 
-## Live traffic: fields the page reads
-
-From the existing live Socket.IO room (`init`, `trafficUpdate`,
-`signalUpdate`). The page never subscribes to simulation, and ignores any
-payload with `dataMode: "simulation"`.
-
-```
-intersectionId, name, lat, lng          -> marker position (point only)
-traffic.<north|south|east|west>.{vehicles, queueLength, waitingTime}
-aiStatus ('CONNECTED' | 'STALE' | 'WAITING'), lastUpdate, serverTime
-emergency.{active, type, direction, confidence, since}
-dataMode
-```
-
-**Not available yet** (so traffic is drawn as points at intersections, never
-as coloured road segments):
-
-- Road geometry for each approach. The approach a route uses is inferred
-  from the route's heading as it reaches the intersection (heading south =
-  entering from the north approach), which assumes the cameras' north/south/
-  east/west match the compass.
-- Surveyed coordinates. Set `INTERSECTION_LAT` / `INTERSECTION_LNG` on the
-  backend; the default position is a placeholder that no through-route
-  passes. Route matching (within 60 m of the line) uses it as-is.
-
-## Backend endpoints the page is ready for (not implemented)
-
-**Traffic-adjusted routes**: set `routing.trafficRoutesUrl` in `config.js`.
-
-```
-POST <trafficRoutesUrl>
-{ "start": {"lat","lng"}, "destination": {"lat","lng"}, "maxRoutes": 4 }
-
-200 { "routes": [ {
-  "geometry": { "type": "LineString", "coordinates": [[lng, lat], ...] },
-  "distance": 5100, "duration": 420, "summary": "via ...",
-  "traffic": {                                  // optional
-    "adjustedDuration": 540, "delay": 120,      // seconds
-    "basis": "live-ai",                         // required for the live label
-    "updatedAt": "2026-10-09T10:00:00Z",
-    "alerts": [ { "message": "Long queue at Main Street" } ]
-  } } ] }
-```
-
-A route is labelled "live AI-adjusted" only when `traffic` has a numeric
-`adjustedDuration`, `basis: "live-ai"` and a valid `updatedAt`. If the call
-fails, OSRM routes are shown with "Live traffic data unavailable". While
-routes come from the backend, they are re-requested when traffic changes
-(at most every `trafficRefreshMs`).
-
-**Hazards** (implemented by `GET /api/hazards`; `reports.backendUrl` in
-`config.js`). Any service with this contract can replace it:
-
-```
-GET <backendUrl>?south=&west=&north=&east=
-200 { "hazards": [ { "id": "c-12", "kind": "speed_camera" | "speed_bump" | "road_closure",
-                     "lat": 35.56, "lng": 45.43, "source": "City traffic department",
-                     "verification": "verified" | "unverified", "label": "...", "reportedAt": "ISO" } ] }
-```
-
-Entries with an unknown `kind` or invalid coordinates are dropped; a missing
-or unknown `verification` is shown as "Unverified user report".
-
-## Notes
-
-- Geolocation needs HTTPS (or `localhost`). Phones opening
-  `http://<LAN-IP>:3000` cannot share their location; they can still tap the
-  map or use the map centre as the start.
-- `window.smartTrafficNav.diagnostics()` reports map/listener counts for
-  checking that live updates never duplicate the map or socket listeners.
+`backend/test/navigation.test.js` and `routeRanking.test.js` test these modules without a browser
+(`npm test` in `backend/`). A real-browser check of the page is described in
+`backend/docs/API_TEST_REPORT.md`.
