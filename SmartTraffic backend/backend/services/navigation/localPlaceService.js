@@ -42,6 +42,7 @@ function toSearchPlace(doc, lang) {
     category: doc.category,
     type: 'local',
     source: 'hawr',
+    boundingBox: null,
     addressDetails: null,
   };
 }

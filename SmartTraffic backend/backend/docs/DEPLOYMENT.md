@@ -55,6 +55,18 @@ Full list: [CONFIGURATION.md](CONFIGURATION.md). Never commit `.env`.
 | Health check path | `/api/health` |
 | Instances | 1 |
 
+**Set the variables in Render.** `backend/.env` is git-ignored and is never deployed: on Render the
+variables come only from the service's **Environment** tab (Dashboard, your service, Environment, Add
+Environment Variable). For search to work add at least `GEOAPIFY_API_KEY` (and `MONGODB_URI`, the token
+secrets and `NODE_ENV=production` from the table above), then **Save** and let the service redeploy. A
+server without `GEOAPIFY_API_KEY` answers `GET /api/v1/places/search` and `/places/reverse` with
+`503 FEATURE_DISABLED`, and the apps show their "search is not available" message. Check it with:
+
+```bash
+curl https://<your-service>.onrender.com/api/v1/config        # features.placeSearch.available must be true
+curl "https://<your-service>.onrender.com/api/v1/places/search?q=Sulaymaniyah&limit=2"
+```
+
 On the free plan the service sleeps when idle and the first request takes tens of seconds,
 which the mobile app sees as a timeout: use an always-on plan for the app. Render's outgoing IP
 addresses change on some plans, so a Geoapify key limited to one IP may need Render's

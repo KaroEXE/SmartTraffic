@@ -290,6 +290,11 @@ test('Geoapify place answers become API places with local-script names; missing 
   assert.equal(place.addressDetails.postcode, props.postcode);
   assert.equal(place.type, props.result_type);
   assert.equal(place.source, 'geoapify');
+  const [west, south, east, north] = feature.bbox;
+  assert.deepEqual(place.boundingBox, { south, west, north, east }, 'the provider extent, as { south, west, north, east }');
+  const noBox = { ...feature, bbox: undefined, properties: { ...props, bbox: undefined } };
+  assert.equal(toPlace(noBox, 'ku').boundingBox, null, 'null when the provider gives none');
+  assert.equal(toPlace({ ...feature, bbox: [45, 35, 44, 36] }, 'ku').boundingBox, null, 'an inverted box is not passed on');
   assert.equal(toPlace({ properties: { name: 'x', lat: null, lon: null } }, null), null, 'null is not the point 0,0');
   assert.equal(toPlace({ properties: { name: 'x', lat: '35', lon: '45' } }, null), null, 'a text position is not a position');
   assert.equal(toPlace({ properties: { lat: 35, lon: 45 } }, null), null, 'nothing to show');

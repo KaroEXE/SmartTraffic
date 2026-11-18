@@ -97,6 +97,7 @@ module.exports = function navigationSpec({
       category: nullable({ type: 'string', description: 'Geoapify category (amenity, healthcare.hospital, ...) or, for a Hawr local place, its category.' }),
       type: nullable({ type: 'string', description: 'Geoapify result type (city, street, amenity, building, ...), or "local" for a Hawr local place.' }),
       source: { type: 'string', enum: ['geoapify', 'hawr'] },
+      boundingBox: nullable(object({ south: num, west: num, north: num, east: num }, ['south', 'west', 'north', 'east'])),
       addressDetails: nullable(object({
         road: nullable(str), houseNumber: nullable(str), suburb: nullable(str), city: nullable(str),
         state: nullable(str), postcode: nullable(str), country: nullable(str), countryCode: nullable(str),

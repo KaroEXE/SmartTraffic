@@ -255,6 +255,7 @@ GET /api/v1/places/search?q=hospital&lat=35.5617&lng=45.4329&limit=1
     "category": "healthcare.clinic_or_praxis",
     "type": "amenity",
     "source": "geoapify",
+    "boundingBox": { "south": 35.5623336, "west": 45.4447634, "north": 35.5624336, "east": 45.4448634 },
     "addressDetails": { "road": "Qanat Street", "houseNumber": null, "suburb": "کانی ئاسکان", "city": "Sulaymaniyah",
                         "state": "Sulaymaniyah Governorate", "postcode": "46001", "country": "Iraq", "countryCode": "iq" }
   }],
@@ -266,6 +267,7 @@ GET /api/v1/places/search?q=hospital&lat=35.5617&lng=45.4329&limit=1
 (A real answer, shortened. `name` is in the asked `lang` when OpenStreetMap has that name, else the local name.)
 
 - `scope`: `local` = ranked near `lat`/`lng`; `global` = no point was sent.
+- `boundingBox` is the extent of the result (`{ south, west, north, east }`, for example a whole city: fit the map to it); `null` when the provider gives none and for Hawr places. `/places/reverse` returns the same Place shape.
 - Places the operator entered (`source: "hawr"`, id `hawr:<id>`) come **first**, then Geoapify results (Iraq only).
 - **Search on submit, not on every keystroke.** No autocomplete: every
   search uses a provider credit (3,000 a day on the free plan), the

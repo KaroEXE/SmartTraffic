@@ -71,6 +71,17 @@ function addressDetails(p) {
   };
 }
 
+/** The extent of a result as { south, west, north, east }, from the provider's bbox [lon1, lat1, lon2, lat2]; null when it gives none. */
+function boundingBox(feature) {
+  const p = feature.properties || {};
+  const b = Array.isArray(feature.bbox) ? feature.bbox
+    : (p.bbox && typeof p.bbox === 'object' ? [p.bbox.lon1, p.bbox.lat1, p.bbox.lon2, p.bbox.lat2] : null);
+  if (!b || b.length !== 4 || !b.every((n) => typeof n === 'number' && Number.isFinite(n))) return null;
+  const [west, south, east, north] = b;
+  if (!isValidLatLng({ lat: south, lng: west }) || !isValidLatLng({ lat: north, lng: east }) || south > north || west > east) return null;
+  return { south, west, north, east };
+}
+
 /** One Geoapify geocoder feature -> Place, or null when it has no usable position or nothing to show. */
 function toPlace(feature, lang) {
   const p = feature && feature.properties;
@@ -88,6 +99,7 @@ function toPlace(feature, lang) {
     category: text(p.category),
     type: text(p.result_type),
     source: 'geoapify',
+    boundingBox: boundingBox(feature),
     addressDetails: addressDetails(p),
   };
 }
