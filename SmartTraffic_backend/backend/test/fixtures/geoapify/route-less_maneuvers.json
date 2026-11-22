@@ -1,0 +1,548 @@
+{
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "mode": "drive",
+    "waypoints": [
+     {
+      "location": [
+       45.4329,
+       35.5617
+      ],
+      "original_index": 0
+     },
+     {
+      "location": [
+       45.4418,
+       35.5702
+      ],
+      "original_index": 1
+     }
+    ],
+    "units": "metric",
+    "details": [
+     "instruction_details"
+    ],
+    "distance": 2950,
+    "distance_units": "meters",
+    "time": 265.267,
+    "legs": [
+     {
+      "distance": 2950,
+      "time": 265.267,
+      "steps": [
+       {
+        "from_index": 0,
+        "to_index": 1,
+        "distance": 92,
+        "time": 11.072,
+        "instruction": {
+         "text": "Drive northwest.",
+         "type": "StartAtLeft",
+         "transition_instruction": "Drive northwest. Then Turn right.",
+         "post_transition_instruction": "Continue for 90 meters.",
+         "contains_next_instruction": true
+        }
+       },
+       {
+        "from_index": 1,
+        "to_index": 7,
+        "distance": 193,
+        "time": 28.38,
+        "instruction": {
+         "text": "Turn right.",
+         "type": "Right",
+         "transition_instruction": "Turn right.",
+         "post_transition_instruction": "Continue for 200 meters."
+        }
+       },
+       {
+        "from_index": 7,
+        "to_index": 13,
+        "distance": 138,
+        "time": 18.526,
+        "instruction": {
+         "text": "Turn right.",
+         "type": "Right",
+         "transition_instruction": "Turn right.",
+         "post_transition_instruction": "Continue for 100 meters."
+        }
+       },
+       {
+        "from_index": 13,
+        "to_index": 21,
+        "distance": 266,
+        "time": 20.824,
+        "instruction": {
+         "text": "Turn right onto شەقامی شەرەفخان.",
+         "type": "Right",
+         "transition_instruction": "Turn right.",
+         "pre_transition_instruction": "Turn right onto شەقامی شەرەفخان.",
+         "post_transition_instruction": "Continue for 300 meters.",
+         "streets": [
+          "شەقامی شەرەفخان"
+         ]
+        }
+       },
+       {
+        "from_index": 21,
+        "to_index": 29,
+        "distance": 221,
+        "time": 17.572,
+        "instruction": {
+         "text": "Turn left.",
+         "type": "Left",
+         "transition_instruction": "Turn left.",
+         "post_transition_instruction": "Continue for 200 meters."
+        }
+       },
+       {
+        "from_index": 29,
+        "to_index": 48,
+        "distance": 471,
+        "time": 47.808,
+        "instruction": {
+         "text": "Turn left onto شەقامی مامۆستایان/3.",
+         "type": "Left",
+         "transition_instruction": "Turn left.",
+         "pre_transition_instruction": "Turn left onto شەقامی مامۆستایان, 3.",
+         "post_transition_instruction": "Continue for 500 meters.",
+         "streets": [
+          "شەقامی مامۆستایان",
+          "3"
+         ]
+        }
+       },
+       {
+        "from_index": 48,
+        "to_index": 62,
+        "distance": 500,
+        "time": 33.862,
+        "instruction": {
+         "text": "Turn right onto Hamdi Street.",
+         "type": "Right",
+         "transition_instruction": "Turn right.",
+         "pre_transition_instruction": "Turn right onto Hamdi Street.",
+         "post_transition_instruction": "Continue for 500 meters.",
+         "streets": [
+          "Hamdi Street"
+         ]
+        }
+       },
+       {
+        "from_index": 62,
+        "to_index": 72,
+        "distance": 584,
+        "time": 45.923,
+        "instruction": {
+         "text": "Turn left onto 25 Pasha Kura.",
+         "type": "Left",
+         "transition_instruction": "Turn left.",
+         "pre_transition_instruction": "Turn left onto 25 Pasha Kura.",
+         "post_transition_instruction": "Continue for 600 meters.",
+         "streets": [
+          "25 Pasha Kura"
+         ]
+        }
+       },
+       {
+        "from_index": 72,
+        "to_index": 84,
+        "distance": 482,
+        "time": 41.295,
+        "instruction": {
+         "text": "Turn left onto Madam Mitterrand.",
+         "type": "Left",
+         "transition_instruction": "Turn left.",
+         "pre_transition_instruction": "Turn left onto Madam Mitterrand.",
+         "post_transition_instruction": "Continue for 500 meters.",
+         "streets": [
+          "Madam Mitterrand"
+         ]
+        }
+       },
+       {
+        "from_index": 84,
+        "to_index": 84,
+        "distance": 0,
+        "time": 0,
+        "instruction": {
+         "text": "Your destination is on the right.",
+         "type": "DestinationReachedRight",
+         "transition_instruction": "Your destination will be on the right.",
+         "pre_transition_instruction": "Your destination is on the right."
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "geometry": {
+    "type": "MultiLineString",
+    "coordinates": [
+     [
+      [
+       45.432944,
+       35.561758
+      ],
+      [
+       45.432083,
+       35.562195
+      ],
+      [
+       45.432117,
+       35.562217
+      ],
+      [
+       45.432167,
+       35.562238
+      ],
+      [
+       45.432827,
+       35.562544
+      ],
+      [
+       45.433269,
+       35.562766
+      ],
+      [
+       45.43342,
+       35.562844
+      ],
+      [
+       45.433898,
+       35.563109
+      ],
+      [
+       45.4341,
+       35.562886
+      ],
+      [
+       45.434171,
+       35.562817
+      ],
+      [
+       45.434243,
+       35.562764
+      ],
+      [
+       45.434389,
+       35.562681
+      ],
+      [
+       45.434575,
+       35.562589
+      ],
+      [
+       45.435075,
+       35.562347
+      ],
+      [
+       45.434361,
+       35.560819
+      ],
+      [
+       45.434199,
+       35.560486
+      ],
+      [
+       45.434153,
+       35.56042
+      ],
+      [
+       45.434087,
+       35.560269
+      ],
+      [
+       45.434074,
+       35.560225
+      ],
+      [
+       45.434073,
+       35.560205
+      ],
+      [
+       45.434078,
+       35.560164
+      ],
+      [
+       45.434111,
+       35.560117
+      ],
+      [
+       45.434144,
+       35.560087
+      ],
+      [
+       45.434217,
+       35.56005
+      ],
+      [
+       45.434396,
+       35.560002
+      ],
+      [
+       45.434596,
+       35.559952
+      ],
+      [
+       45.434917,
+       35.559886
+      ],
+      [
+       45.435232,
+       35.559822
+      ],
+      [
+       45.435837,
+       35.559694
+      ],
+      [
+       45.436432,
+       35.559563
+      ],
+      [
+       45.436443,
+       35.559595
+      ],
+      [
+       45.436678,
+       35.560343
+      ],
+      [
+       45.436721,
+       35.560479
+      ],
+      [
+       45.43681,
+       35.560763
+      ],
+      [
+       45.4369,
+       35.561053
+      ],
+      [
+       45.436969,
+       35.561274
+      ],
+      [
+       45.436973,
+       35.561287
+      ],
+      [
+       45.437131,
+       35.561798
+      ],
+      [
+       45.437289,
+       35.562285
+      ],
+      [
+       45.437435,
+       35.562693
+      ],
+      [
+       45.437527,
+       35.562951
+      ],
+      [
+       45.437554,
+       35.562993
+      ],
+      [
+       45.437578,
+       35.563037
+      ],
+      [
+       45.437599,
+       35.563082
+      ],
+      [
+       45.437616,
+       35.563127
+      ],
+      [
+       45.437704,
+       35.563359
+      ],
+      [
+       45.437736,
+       35.563449
+      ],
+      [
+       45.437777,
+       35.563537
+      ],
+      [
+       45.437823,
+       35.563626
+      ],
+      [
+       45.437851,
+       35.563608
+      ],
+      [
+       45.437879,
+       35.563595
+      ],
+      [
+       45.437918,
+       35.563585
+      ],
+      [
+       45.438181,
+       35.563527
+      ],
+      [
+       45.438943,
+       35.56336
+      ],
+      [
+       45.43969,
+       35.563185
+      ],
+      [
+       45.439771,
+       35.563166
+      ],
+      [
+       45.439944,
+       35.563127
+      ],
+      [
+       45.440784,
+       35.562939
+      ],
+      [
+       45.44089,
+       35.56292
+      ],
+      [
+       45.441854,
+       35.562744
+      ],
+      [
+       45.441989,
+       35.56272
+      ],
+      [
+       45.442519,
+       35.562631
+      ],
+      [
+       45.443182,
+       35.562522
+      ],
+      [
+       45.443692,
+       35.563277
+      ],
+      [
+       45.443986,
+       35.56382
+      ],
+      [
+       45.444118,
+       35.564065
+      ],
+      [
+       45.444186,
+       35.564182
+      ],
+      [
+       45.444379,
+       35.564516
+      ],
+      [
+       45.444615,
+       35.564991
+      ],
+      [
+       45.444697,
+       35.565059
+      ],
+      [
+       45.445306,
+       35.566395
+      ],
+      [
+       45.445694,
+       35.567221
+      ],
+      [
+       45.445765,
+       35.567315
+      ],
+      [
+       45.445677,
+       35.567357
+      ],
+      [
+       45.445402,
+       35.567486
+      ],
+      [
+       45.444987,
+       35.567714
+      ],
+      [
+       45.444589,
+       35.567994
+      ],
+      [
+       45.444382,
+       35.568166
+      ],
+      [
+       45.444162,
+       35.56835
+      ],
+      [
+       45.443705,
+       35.568733
+      ],
+      [
+       45.443521,
+       35.568888
+      ],
+      [
+       45.443114,
+       35.569191
+      ],
+      [
+       45.44214,
+       35.569848
+      ],
+      [
+       45.442084,
+       35.569884
+      ],
+      [
+       45.441718,
+       35.570113
+      ]
+     ]
+    ]
+   }
+  }
+ ],
+ "properties": {
+  "mode": "drive",
+  "waypoints": [
+   {
+    "lat": 35.5617,
+    "lon": 45.4329
+   },
+   {
+    "lat": 35.5702,
+    "lon": 45.4418
+   }
+  ],
+  "units": "metric",
+  "details": [
+   "instruction_details"
+  ]
+ },
+ "type": "FeatureCollection"
+}

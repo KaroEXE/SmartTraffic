@@ -1,0 +1,12 @@
+{
+  "intersectionId": "main",
+  "timestamp": "2026-10-08T11:00:00Z",
+  "traffic": {
+    "north": { "vehicles": 12, "queueLength": 8, "waitingTime": 15 },
+    "south": { "vehicles": 4, "queueLength": 3, "waitingTime": 7 },
+    "east": { "vehicles": 20, "queueLength": 15, "waitingTime": 22 },
+    "west": { "vehicles": 5, "queueLength": 4, "waitingTime": 10 }
+  },
+  "pedestrians": { "north": false, "south": true, "east": false, "west": false },
+  "emergency": { "detected": true, "type": "ambulance", "direction": "north", "confidence": 0.94 }
+}

@@ -1,0 +1,119 @@
+const express = require('express');
+const { hasBearerToken } = require('../utils/auth');
+const { deviceAuth } = require('../utils/deviceToken');
+const { userAuth } = require('../utils/userToken');
+const { loginEmailKey } = require('../utils/navValidation');
+const { createRateLimiter } = require('../utils/rateLimit');
+const { handle, sendError } = require('../utils/apiError');
+
+/**
+ * Mobile navigation API, mounted at /api/v1. See docs/API_REFERENCE.md and
+ * docs/MOBILE_INTEGRATION_GUIDE.md; Swagger documents every route here
+ * (docs/openapiNavigation.js, checked by test/navigationApi.test.js).
+ *
+ * Access
+ *   public   no token
+ *   device   "Authorization: Bearer <device token>" from POST /auth/device
+ *   user     "Authorization: Bearer <user token>" from POST /auth/signup or /auth/login
+ *   admin    "Authorization: Bearer <NAV_ADMIN_TOKEN>" - operator tools (admin console) only,
+ *            never in the app; disabled (503) when NAV_ADMIN_TOKEN is not set
+ *
+ * Rate limits (config.navigation.rateLimits): every route per IP, plus a
+ * tighter per-IP limit on the routes that call external providers and
+ * per-device limits on writes.
+ */
+function createNavigationRoutes({
+  navigationController: nav, roadDataController: road, authController: auth, adminController: operator, placeDataController: placeData, deviceTokens, userTokens, adminToken, rateLimits, now = Date.now,
+}) {
+  const router = express.Router();
+  const minute = 60_000;
+  const hour = 3_600_000;
+  const limit = (name, windowMs, max, key) => createRateLimiter({
+    name, windowMs, max, key, now,
+  });
+  const perDevice = (req) => (req.device ? req.device.id : null);
+
+  const general = limit('API', minute, rateLimits.perMinute);
+  const search = limit('place search', minute, rateLimits.searchPerMinute);
+  const places = limit('nearby place', minute, rateLimits.placesPerMinute);
+  const routes = limit('route', minute, rateLimits.routesPerMinute);
+  const registrations = limit('device registration', hour, rateLimits.deviceRegistrationsPerHour);
+  const reports = limit('report', hour, rateLimits.reportsPerHour, perDevice);
+  const votes = limit('vote', hour, rateLimits.votesPerHour, perDevice);
+  const signups = limit('sign-up', hour, rateLimits.signupsPerHour);
+  const logins = limit('sign-in', hour, rateLimits.loginsPerHour);
+  // Per account too, so one account's password cannot be guessed from many IPs.
+  const accountLogins = limit('sign-in', hour, rateLimits.loginsPerAccountPerHour, (req) => loginEmailKey(req.body));
+  // Password checks of a signed-in user (change password, delete account).
+  const passwordChecks = limit('password check', hour, rateLimits.loginsPerAccountPerHour, (req) => req.userId || null);
+
+  const device = deviceAuth(deviceTokens, { required: true });
+  const optionalDevice = deviceAuth(deviceTokens, { required: false });
+  const user = userAuth(userTokens);
+  const admin = (req, res, next) => {
+    if (!adminToken) return sendError(res, 503, 'FEATURE_DISABLED', 'Administration is disabled: set NAV_ADMIN_TOKEN on the backend');
+    if (!hasBearerToken(req, adminToken)) {
+      res.set('WWW-Authenticate', 'Bearer realm="admin"');
+      return sendError(res, 401, 'ADMIN_TOKEN_INVALID', 'Missing or invalid admin token');
+    }
+    return next();
+  };
+
+  router.use((req, res, next) => {
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
+  router.use(general);
+
+  router.get('/config', handle(nav.config));
+  router.post('/auth/device', registrations, optionalDevice, handle(nav.registerDevice));
+  router.post('/auth/signup', signups, handle(auth.signup));
+  router.post('/auth/login', logins, accountLogins, handle(auth.login));
+  router.post('/auth/refresh', user, handle(auth.refresh));
+  router.post('/auth/logout', user, handle(auth.logout));
+  router.post('/auth/change-password', user, passwordChecks, handle(auth.changePassword));
+  router.get('/auth/me', user, handle(auth.me));
+  router.patch('/auth/me', user, handle(auth.updateMe));
+  router.delete('/auth/me', user, passwordChecks, handle(auth.deleteMe));
+
+  router.get('/places/search', search, handle(nav.searchPlaces));
+  router.get('/places/reverse', search, handle(nav.reversePlace));
+  router.get('/places/nearby', places, handle(nav.nearbyPlaces));
+  router.get('/places/local', handle(placeData.listLocal));
+  router.get('/places/local/:id', handle(placeData.getLocal));
+  router.post('/places/local', admin, handle(placeData.createLocal));
+  router.patch('/places/local/:id', admin, handle(placeData.updateLocal));
+  router.delete('/places/local/:id', admin, handle(placeData.deleteLocal));
+  router.get('/saved-places', user, handle(placeData.listSaved));
+  router.post('/saved-places', user, handle(placeData.createSaved));
+  router.patch('/saved-places/:id', user, handle(placeData.updateSaved));
+  router.delete('/saved-places/:id', user, handle(placeData.deleteSaved));
+
+  router.post('/routes', routes, handle(nav.planRoutes));
+  router.get('/traffic', handle(nav.traffic));
+
+  router.get('/road-features', handle(road.listFeatures));
+  router.get('/road-features/:id', handle(road.getFeature));
+  router.post('/road-features', admin, handle(road.createFeature));
+  router.patch('/road-features/:id', admin, handle(road.updateFeature));
+  router.delete('/road-features/:id', admin, handle(road.deleteFeature));
+
+  router.get('/reports', optionalDevice, handle(road.listReports));
+  router.get('/reports/:id', optionalDevice, handle(road.getReport));
+  router.post('/reports', device, reports, handle(road.createReport));
+  router.post('/reports/:id/votes', device, votes, handle(road.voteReport));
+  router.delete('/reports/:id', device, handle(road.withdrawReport));
+  router.patch('/reports/:id', admin, handle(road.moderateReport));
+
+  router.get('/admin/overview', admin, handle(operator.overview));
+  router.get('/admin/users', admin, handle(operator.listUsers));
+  router.get('/admin/reports', admin, handle(operator.listReports));
+  router.get('/admin/road-features', admin, handle(operator.listFeatures));
+  router.get('/admin/places', admin, handle(operator.listPlaces));
+
+  router.use((req, res) => sendError(res, 404, 'NOT_FOUND', `No route ${req.method} ${req.originalUrl}`));
+  return router;
+}
+
+module.exports = { createNavigationRoutes };

@@ -1,0 +1,241 @@
+const path = require('path');
+const http = require('http');
+const express = require('express');
+const cors = require('cors');
+
+const config = require('./config');
+const intersections = require('./config/intersections');
+const simulationIntersections = require('./config/simulationIntersections');
+const { connectDatabase, disconnectDatabase, getDatabaseStatus, isDatabaseConnected } = require('./config/database');
+const { createTrafficDecisionService } = require('./services/trafficDecisionService');
+const { trafficStateService } = require('./services/trafficStateService');
+const { createTrafficHistoryService } = require('./services/trafficHistoryService');
+const { createSimulationService } = require('./services/simulationService');
+const { createStreamRegistryService } = require('./services/streamRegistryService');
+const { buildTopology } = require('./services/networkTopology');
+const { createNetworkCoordinator } = require('./services/networkCoordinator');
+const { createTrafficController } = require('./controllers/trafficController');
+const { createSimulationController } = require('./controllers/simulationController');
+const { createStreamController } = require('./controllers/streamController');
+const { createTrafficRoutes, createSimulationRoutes, createStreamRoutes } = require('./routes/trafficRoutes');
+const { createDocsRoutes } = require('./routes/docsRoutes');
+const { createNavigationApi, navigationWarnings } = require('./services/navigation');
+const { MAP_ATTRIBUTION } = require('./controllers/navigationController');
+const { OSM_ATTRIBUTION } = require('./controllers/geoController');
+const { createGeoApi, geoWarnings } = require('./services/geo');
+const { corsOrigin } = require('./utils/cors');
+const { productionProblems } = require('./config/production');
+
+if (config.production) {
+  const problems = productionProblems(config);
+  if (problems.length) {
+    console.error('[server] Not starting in production:');
+    for (const problem of problems) console.error(`  - ${problem}`);
+    process.exit(1);
+  }
+}
+const { initTrafficSocket } = require('./socket/trafficSocket');
+
+const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
+
+function packageDir(name) {
+  return path.join(__dirname, 'node_modules', name);
+}
+
+const app = express();
+const server = http.createServer(app);
+
+// LIVE channel: AI observations (POST /api/traffic) -> trafficStateService
+// -> decision engine `service` -> Socket.IO room "live". Only real data.
+const service = createTrafficDecisionService({ intersections, config });
+
+// LIVE network coordination: network-aware scores for every intersection
+// with fresh AI data, and emergency corridors from camera detections
+// (route assumed straight ahead - there is no GPS feed). Intersections
+// without data keep their own fixed-time plan.
+const network = createNetworkCoordinator({
+  engine: service,
+  topology: buildTopology(intersections, config.network),
+  config,
+  dataMode: 'live',
+  enabled: config.network.ENABLED,
+  cameraCorridors: config.network.CORRIDOR_FROM_CAMERA,
+});
+
+// SIMULATION channel (the dashboard's Simulation tab): its own generator,
+// engine, store and intersection list, idle until started from the
+// dashboard. Shares nothing with the live objects above, and nothing it
+// produces can reach them.
+const simulation = createSimulationService({ intersections: simulationIntersections, config });
+
+// Historical data (MongoDB). Signal control does not depend on it. One
+// instance per channel; each stamps its own dataMode on what it writes.
+const sampleIntervalMs = config.historySampleSeconds * 1000;
+const history = config.mongodbUri
+  ? createTrafficHistoryService({
+    stateService: trafficStateService, decisionService: service, dataMode: 'live', sampleIntervalMs,
+  }).start()
+  : null;
+const simulationHistory = config.mongodbUri
+  ? createTrafficHistoryService({
+    stateService: simulation.stateService, decisionService: simulation.engine, dataMode: 'simulation', sampleIntervalMs,
+  }).start()
+  : null;
+if (simulationHistory) simulation.on('reset', () => simulationHistory.resetTracking());
+
+// Camera stream registry (MongoDB). Live channel only. Reloaded every 30 s
+// while the database is connected, so the dashboard's camera status and
+// ingestion's attribution check use the current configuration.
+const streams = createStreamRegistryService();
+const refreshStreams = () => {
+  if (isDatabaseConnected()) streams.refresh().catch(() => {});
+};
+setInterval(refreshStreams, 30_000).unref();
+setTimeout(refreshStreams, 2_000).unref();
+
+// MOBILE NAVIGATION API (/api/v1): places, routes, live traffic, road
+// features and community reports for the public navigation app. Reads the
+// LIVE engine only; road features and reports are stored in MongoDB.
+// GEOGRAPHIC API (/api/search, /api/geocode/reverse, and the place endpoints of /api/v1): Redoz's own
+// PostgreSQL/PostGIS database (OpenStreetMap + Redoz places). The pool opens on first use, so the
+// server starts without it; without DATABASE_URL those endpoints answer 503 FEATURE_DISABLED.
+const geoApi = createGeoApi({ config });
+const navigation = createNavigationApi({ config, engine: service, geo: geoApi.service });
+
+const controller = createTrafficController(service, {
+  history,
+  databaseHealth: () => ({
+    status: getDatabaseStatus(),
+    ...(history ? history.stats() : {}),
+    ...(simulationHistory ? { simulation: simulationHistory.stats() } : {}),
+  }),
+  ingestToken: config.trafficIngestToken,
+  streamRegistry: streams,
+  network,
+  navigationHealth: navigation.publicHealth,
+});
+const simulationReadController = createTrafficController(simulation.engine, {
+  stateService: simulation.stateService, network: simulation.coordinator,
+});
+if (!config.trafficIngestToken) {
+  console.warn('[server] TRAFFIC_INGEST_TOKEN is not set: anyone who can reach POST /api/traffic can post traffic data. Set it (and the same value on the AI service) in production.');
+}
+
+app.disable('x-powered-by');
+// Behind a reverse proxy (Render, Nginx) req.ip is the client only with this set.
+app.set('trust proxy', config.trustProxy);
+const allowedOrigin = corsOrigin(config.cors);
+app.use(cors({ origin: allowedOrigin }));
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'SAMEORIGIN');
+  res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+app.use(express.json({ limit: '100kb' }));
+
+// Settings the browser needs. Only public values: the map style is a public URL (no key).
+app.get('/api/client-config', (req, res) => {
+  const { provider, styleUrl, bounds, minZoom, maxZoom } = config.navigation.map;
+  res.json({
+    ok: true,
+    aiStreamUrl: config.aiStreamUrl || null,
+    map: {
+      provider, styleUrl, bounds, minZoom, maxZoom, attribution: MAP_ATTRIBUTION,
+    },
+    searchAttribution: OSM_ATTRIBUTION,
+  });
+});
+
+app.use('/api', createDocsRoutes());
+app.use('/api/v1', navigation.router);
+app.use('/api', geoApi.router);
+
+app.use('/api/streams', createStreamRoutes(
+  createStreamController(streams, {
+    hasIntersection: (id) => service.has(id),
+    secrets: [config.trafficIngestToken, config.streamAdminToken],
+  }),
+  { ingestToken: config.trafficIngestToken, adminToken: config.streamAdminToken },
+));
+app.use('/api/simulation', createSimulationRoutes(simulationReadController, createSimulationController(simulation), { locked: config.production }));
+app.use('/api', createTrafficRoutes(controller));
+app.use('/api', (req, res) => res.status(404).json({ ok: false, code: 'NOT_FOUND', error: `No route ${req.method} ${req.originalUrl}` }));
+
+// Frontend + its two rendering libraries, served locally so the 3D view
+// works without a CDN (the map tiles come from OpenFreeMap).
+app.use('/vendor/three', express.static(packageDir('three')));
+app.use('/vendor/maplibre-gl', express.static(path.join(packageDir('maplibre-gl'), 'dist')));
+app.use(express.static(FRONTEND_DIR));
+
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ ok: false, code: 'MALFORMED_JSON', error: 'Malformed JSON body' });
+  }
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'Payload too large' });
+  }
+  console.error('[server] unhandled error:', err);
+  return res.status(500).json({ ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
+});
+
+initTrafficSocket(server, service, {
+  corsOrigin: allowedOrigin, simulation, streams, network,
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[server] Port ${config.port} is already in use. Set PORT in backend/.env or stop the other process.`);
+    process.exit(1);
+  }
+  throw err;
+});
+
+// Start order: connect to the database and verify it, then open the API. With
+// MONGODB_URI set the backend refuses to start without a working database;
+// without it (local development) it starts and says so.
+async function start() {
+  try {
+    await connectDatabase(config.mongodbUri, { required: Boolean(config.mongodbUri) });
+  } catch (err) {
+    console.error(`[server] Not starting: ${err.message}`);
+    process.exit(1);
+  }
+  service.start(250);
+  network.start();
+  server.listen(config.port, () => {
+    console.log('');
+    console.log('  Smart Traffic AI - control backend');
+    console.log(`  Swagger     http://localhost:${config.port}/api/docs/`);
+    console.log(`  Dashboard   http://localhost:${config.port}`);
+    console.log(`  API         http://localhost:${config.port}/api/health`);
+    console.log(`  Mobile API  http://localhost:${config.port}/api/v1/config`);
+    console.log(`  Search      http://localhost:${config.port}/api/search?q=...`);
+    console.log(`  Ingest      POST http://localhost:${config.port}/api/traffic`);
+    console.log(`  Admin       http://localhost:${config.port}/admin.html`);
+    console.log(`  Intersections: ${service.ids().join(', ')}`);
+    console.log('');
+    for (const warning of navigationWarnings(config.navigation)) console.warn(`[navigation] ${warning}`);
+    for (const warning of geoWarnings(config.postgres)) console.warn(`[geo] ${warning}`);
+  });
+}
+start();
+
+async function shutdown() {
+  service.stop();
+  network.stop();
+  simulation.pause();
+  if (history) history.stop();
+  if (simulationHistory) simulationHistory.stop();
+  server.close();
+  setTimeout(() => process.exit(0), 3000).unref();
+  // Finish in-flight history writes; open Socket.IO clients do not delay this.
+  if (history) await history.flush();
+  if (simulationHistory) await simulationHistory.flush();
+  await disconnectDatabase().catch(() => {});
+  await geoApi.close();
+  process.exit(0);
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

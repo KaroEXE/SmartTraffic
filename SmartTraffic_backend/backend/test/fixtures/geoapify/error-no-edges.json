@@ -1,0 +1,8 @@
+{
+ "status": 400,
+ "body": {
+  "statusCode": 400,
+  "error": "Bad Request",
+  "message": "No suitable edges near location. Please check waypoint coordinate order (lat/lon)."
+ }
+}
