@@ -1,0 +1,13 @@
+node_modules/
+.env
+*.log
+.DS_Store
+Thumbs.db
+
+# Driver road reports (runtime data)
+backend/data/
+
+# OpenStreetMap extracts and database dumps (large; import with the db:import-osm script)
+*.osm.pbf
+*.pbf
+*.dump
