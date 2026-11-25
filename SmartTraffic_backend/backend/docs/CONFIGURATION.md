@@ -88,6 +88,7 @@ Place search, reverse geocoding and nearby places run on our own PostgreSQL/Post
 |---|---|---|
 | `DATABASE_URL` | unset | `postgresql://user:password@host:5432/database`. Unset: the server starts and `GET /api/search`, `GET /api/geocode/reverse` and `/api/v1/places/*` answer `503 FEATURE_DISABLED`. The database must be UTF8 with a UTF-8 ctype and allow `postgis` and `pg_trgm`. Secret: on Northflank set it as a secret environment variable; never commit it, never log it. |
 | `DATABASE_SSL` | `false` | `false` (local, private network), `true` (TLS, verify the certificate) or `no-verify`. |
+| `DATABASE_SCHEMA` | empty (`public`) | Schema that holds this layer's tables, e.g. `redoz`. Use it on a database that already has other data: migration, import and the server then stay inside it. Same value everywhere. |
 | `DATABASE_POOL_MAX` | `10` | Connections this backend may keep open. |
 | `DATABASE_STATEMENT_TIMEOUT_MS` | `5000` | A geographic query running longer is cancelled: `503 GEO_QUERY_TIMEOUT`. |
 | `OSM_PBF_PATH`, `OSM2PGSQL_BIN` | unset | Import job only (`npm run db:import-osm`): the extract (default: the only `*.osm.pbf` in the repository root) and the osm2pgsql binary. |

@@ -9,6 +9,25 @@ const {
 } = require('../models/navigationConstants');
 const { DIRECTIONS } = require('../utils/validation');
 
+/**
+ * What each group is for and which database answers it (shown in Swagger). Keep in step with
+ * docs/MOBILE_INTEGRATION_GUIDE.md ("Where the data lives"). PostgreSQL/PostGIS = places and search;
+ * MongoDB = users and everything the people and operators create.
+ */
+const TAG_DESCRIPTIONS = {
+  'Mobile: app': 'Start here. Server features, limits and the attribution texts to show; anonymous device tokens. No place data is read. See docs/MOBILE_INTEGRATION_GUIDE.md.',
+  'Mobile: account': 'Sign up, sign in and manage the account. **MongoDB** (users).',
+  'Mobile: places': 'Place search, address at a point and places around a point. **PostgreSQL/PostGIS** (OpenStreetMap data of Iraq + Redoz places); the search also returns the operator\'s Hawr places (MongoDB) first. Public, no token, rate limited per IP. Show the OpenStreetMap attribution next to the results.',
+  'Geographic search': 'The same PostgreSQL/PostGIS data with a cleaner answer: paging, Arabic / Kurdish / English names, misspellings, "restaurant near me", and a richer reverse geocoder (street, district, city, governorate, nearest road). Outside /api/v1. See docs/GEO_DATABASE.md.',
+  'Mobile: routes': 'Routes between points, ranked by travel time with live traffic added. Geometry from the routing provider (Geoapify or an own OSRM server); live delays from the AI traffic state; road alerts from **MongoDB** (reports and road features).',
+  'Mobile: traffic': 'Live traffic at the monitored intersections, from the AI cameras (kept in memory by the signal engine, not read from a database).',
+  'Mobile: road features': 'Speed cameras, speed bumps, closures and roadworks entered by the operator. **MongoDB.** Reading is public; changing is admin only.',
+  'Mobile: community reports': 'Road conditions reported by drivers, with votes. **MongoDB.** Reading is public, writing needs a device token.',
+  'Admin console': 'Operator tools. Need NAV_ADMIN_TOKEN; never ship that token in the mobile app. **MongoDB.**',
+  'Hawr places': 'Important places the operator entered (hospitals, mosques, landmarks ...), a map layer. **MongoDB.** Reading is public; changing is admin only.',
+  'Saved places': 'A signed-in user\'s home, work and favourites. **MongoDB.** Needs a user token.',
+};
+
 module.exports = function navigationSpec({
   ref, object, array, str, num, bool, date, nullableDate,
 }) {
@@ -857,12 +876,7 @@ module.exports = function navigationSpec({
   return {
     paths,
     schemas,
-    tags: Object.values(tags).map((name) => ({
-      name,
-      description: name === tags.geo
-        ? 'Redoz\'s own search and reverse geocoding (PostgreSQL/PostGIS + OpenStreetMap). See docs/GEO_DATABASE.md.'
-        : 'Navigation API (/api/v1) used by the web app, the mobile app and the admin console. See docs/MOBILE_INTEGRATION_GUIDE.md.',
-    })),
+    tags: Object.values(tags).map((name) => ({ name, description: TAG_DESCRIPTIONS[name] })),
     securitySchemes: {
       deviceToken: {
         type: 'http', scheme: 'bearer', bearerFormat: 'JWT', description: 'Anonymous device token from POST /api/v1/auth/device.',

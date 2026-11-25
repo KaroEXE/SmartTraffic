@@ -15,7 +15,7 @@ async function main() {
   }
   const pg = createPostgres({ config: { ...config.postgres, statementTimeoutMs: 0 }, translateErrors: false });
   try {
-    const { applied, skipped } = await migrate({ pg });
+    const { applied, skipped } = await migrate({ pg, schema: config.postgres.schema });
     console.log(`[db:migrate] done: ${applied.length} applied, ${skipped.length} already applied`);
   } catch (err) {
     console.error(`[db:migrate] failed: ${err.message}`);

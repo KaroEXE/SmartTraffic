@@ -10,11 +10,13 @@ const assert = require('node:assert/strict');
 
 const url = (process.env.GEO_TEST_DATABASE_URL || '').trim();
 const skip = url ? false : 'set GEO_TEST_DATABASE_URL to run the PostGIS tests';
+// GEO_TEST_DATABASE_SCHEMA: the schema db:migrate / db:import-osm used (DATABASE_SCHEMA); default "public".
+const schema = (process.env.GEO_TEST_DATABASE_SCHEMA || '').trim() || 'public';
 
 const { createPostgres } = require('../db/postgres');
 const { createGeoRepository } = require('../repositories/geoRepository');
 const { createGeoService } = require('../services/geo/geoService');
-const { buildSearch } = require('../repositories/geoRepository');
+const { buildSearch, SEARCH_SETTINGS_SQL } = require('../repositories/geoRepository');
 
 const SULAYMANIYAH = { lat: 35.5617, lng: 45.4329 };
 const IRAQ = { south: 29, west: 38, north: 38, east: 49 };
@@ -25,7 +27,7 @@ let geo;
 
 test.before(async () => {
   if (skip) return;
-  pg = createPostgres({ config: { url, ssl: (process.env.GEO_TEST_DATABASE_SSL || 'false'), poolMax: 4, statementTimeoutMs: 20_000 }, log: { warn() {} } });
+  pg = createPostgres({ config: { url, ssl: (process.env.GEO_TEST_DATABASE_SSL || 'false'), schema: schema === 'public' ? '' : schema, poolMax: 4, statementTimeoutMs: 20_000 }, log: { warn() {} } });
   repository = createGeoRepository({ pg });
   geo = createGeoService({ repository, enabled: true });
 });
@@ -37,15 +39,15 @@ const near = async (result, point, maxKm) => (await km({ lat: result.latitude, l
 test('the schema is migrated: extensions, tables, indexes', { skip }, async () => {
   const ext = (await pg.query("SELECT extname FROM pg_extension WHERE extname IN ('postgis', 'pg_trgm') ORDER BY 1")).rows.map((r) => r.extname);
   assert.deepEqual(ext, ['pg_trgm', 'postgis']);
-  const tables = (await pg.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'
+  const tables = (await pg.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = '${schema}'
     AND table_name IN ('search_entities', 'search_names', 'category_terms', 'admin_area_parts', 'redoz_places', 'redoz_place_metadata', 'redoz_place_reports', 'osm_places', 'osm_roads', 'osm_addresses', 'osm_admin_areas', 'schema_migrations') ORDER BY 1`)).rows.map((r) => r.table_name);
   assert.deepEqual(tables, ['admin_area_parts', 'category_terms', 'osm_addresses', 'osm_admin_areas', 'osm_places', 'osm_roads', 'redoz_place_metadata', 'redoz_place_reports', 'redoz_places', 'schema_migrations', 'search_entities', 'search_names']);
-  const indexes = (await pg.query("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public'")).rows;
-  const has = (table, using) => indexes.some((i) => i.indexdef.includes(`ON public.${table} USING ${using}`));
+  const indexes = (await pg.query(`SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = '${schema}'`)).rows;
+  const has = (table, using) => indexes.some((i) => i.indexdef.includes(`ON ${schema}.${table} USING ${using}`));
   for (const table of ['search_entities', 'osm_places', 'osm_roads', 'osm_addresses', 'osm_admin_areas', 'admin_area_parts', 'redoz_places']) assert.ok(has(table, 'gist'), `${table} has a GiST index`);
   assert.ok(indexes.some((i) => i.indexname === 'search_names_trgm_gix' && /gin/.test(i.indexdef) && /gin_trgm_ops/.test(i.indexdef)), 'trigram GIN index on search_names');
   assert.ok(indexes.some((i) => i.indexname === 'search_names_prefix_ix' && /text_pattern_ops/.test(i.indexdef)), 'prefix index on search_names');
-  const srid = (await pg.query("SELECT f_table_name, srid FROM geometry_columns WHERE f_table_schema = 'public' AND f_table_name IN ('osm_places', 'osm_roads', 'search_entities', 'redoz_places')")).rows;
+  const srid = (await pg.query(`SELECT f_table_name, srid FROM geometry_columns WHERE f_table_schema = '${schema}' AND f_table_name IN ('osm_places', 'osm_roads', 'search_entities', 'redoz_places')`)).rows;
   assert.ok(srid.length >= 4 && srid.every((r) => r.srid === 4326), 'SRID 4326 everywhere');
 });
 
@@ -161,7 +163,7 @@ test('search is index-driven: no sequential scan, and the work done is bounded',
   for (const c of cases) {
     const { sql, params } = buildSearch({ ...c, limit: 10, offset: 0 });
     const plan = await pg.transaction(async (client) => {
-      await client.query("SELECT set_config('pg_trgm.similarity_threshold', '0.25', true), set_config('pg_trgm.word_similarity_threshold', '0.45', true)");
+      await client.query(SEARCH_SETTINGS_SQL); // exactly what searchPlaces runs before the query
       return (await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`, params)).rows[0]['QUERY PLAN'][0];
     });
     const nodes = [];

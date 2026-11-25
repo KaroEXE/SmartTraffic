@@ -1,10 +1,10 @@
 # Geographic database: PostgreSQL + PostGIS + OpenStreetMap
 
-> **Status (November 2026): code written, not yet run against a real database.** The migrations, the OpenStreetMap
-> import, the SQL and the ranking have unit and HTTP tests with stand-ins (`npm test`), but the tests that need PostGIS
-> (`test/geoDatabase.test.js`, skipped without `GEO_TEST_DATABASE_URL`) have not run, and no OpenStreetMap data has been
-> loaded yet. The figures and example outputs in this guide are therefore not measured results. Until they are, treat
-> the ranking and the reverse-geocoding admin levels as design, not as verified behaviour.
+> **Status (November 2026): verified on PostgreSQL 17 + PostGIS 3.7 with the Iraq extract** (`iraq-261117.osm.pbf`:
+> 128k places of interest, 32k streets, 22k settlements, 1.7k administrative areas; about 600 MB of tables). All five
+> migrations, the import, the 16 tests of `test/geoDatabase.test.js` and the HTTP endpoints ran against a real database,
+> including with `DATABASE_SCHEMA=redoz` next to an older osm2pgsql import whose rows and content stayed unchanged. Not yet measured: the
+> Northflank addon itself (see "Production (Northflank)"). Searches took 30-150 ms there.
 
 Search, reverse geocoding, nearby places and (later) routing data come from **our own PostgreSQL/PostGIS database**
 filled from an OpenStreetMap extract. No external search or geocoding provider is called. MongoDB is unchanged and
@@ -169,9 +169,16 @@ page: the first migration (`001_extensions.sql`) fails with a clear message if t
 **Deploy with TLS** and **Publicly accessible** switched on in the addon's networking settings (the external connection
 strings then appear in its connection details); the alternative is `northflank forward` from the Northflank CLI for local access.
 
-* The Node service needs **only `DATABASE_URL`** as an environment variable / secret on Northflank (use the addon's
-  private/internal connection string from the backend service; `DATABASE_SSL=false` there if TLS is not used internally, or
-  `true` / `no-verify` with TLS). The `.osm.pbf` is **never** in git or in the image.
+* **A database that already holds other data: use `DATABASE_SCHEMA=redoz`.** Every table of this layer (the four `osm_*`
+  tables, osm2pgsql's own `osm2pgsql_properties` and slim helper tables, `search_*`, `redoz_*`, `schema_migrations`) is then
+  created in the `redoz` schema, and the backend's connections use `search_path = redoz, public` (PostGIS and `pg_trgm` stay
+  where they are). Nothing outside that schema is created, changed or dropped; without the setting everything goes to
+  `public` and `db:import-osm` would replace same-named tables there (osm2pgsql's default `planet_osm_*` prefix included).
+  Set the same value for `db:migrate`, `db:import-osm` and the running service; use it as `GEO_TEST_DATABASE_SCHEMA` for the tests.
+* The Node service needs **`DATABASE_URL`** (and `DATABASE_SCHEMA` / `DATABASE_SSL` as above) as environment variables / secrets on Northflank (use the addon's
+  private/internal connection string from the backend service). **Set `DATABASE_SSL=no-verify`**: the addon refuses unencrypted
+  connections even from inside Northflank's network (`pg_hba.conf rejects connection ... no encryption`), and its certificate
+  is not issued for the private host name. `DATABASE_SSL` is the only TLS setting: a `?sslmode=` in the connection string is ignored. The `.osm.pbf` is **never** in git or in the image.
 * The database must be created UTF8 with a UTF-8 ctype (the addon's default database usually is; migration 001 checks it
   and refuses otherwise).
 * Populate it from a machine that has the file and osm2pgsql, using the addon's **external** connection string (TLS on,
@@ -180,6 +187,14 @@ strings then appear in its connection details); the alternative is `northflank f
   needs temporary disk for the slim tables before `--drop` removes them: check the addon's storage before importing
   (`SELECT pg_size_pretty(pg_database_size(current_database()))` afterwards; the plan's storage limit is in the addon's
   settings). Alternatively import into a local PostGIS and move it with `pg_dump -Fc` / `pg_restore --no-owner`.
+* **Small disk (e.g. a 6 GB addon with 3 GB used): do not import directly.** The import needs about +1.4 GB at its peak
+  (osm2pgsql's slim tables) plus write-ahead log; the finished layer is only about 450 MB. Import into a temporary local
+  PostGIS (same `DATABASE_SCHEMA`, `npm run db:migrate && npm run db:import-osm`), then copy the finished schema:
+  `pg_dump -Fc -n redoz --no-owner --no-privileges -f redoz.dump`, and on the addon (through `northflank forward`, `PGSSLMODE=require`)
+  `pg_restore --single-transaction --clean --if-exists --no-owner --no-privileges -d <db> redoz.dump`, then `ANALYZE` every
+  `redoz` table (a dump carries no planner statistics). One transaction: a dropped tunnel rolls back to the previous state.
+  Done once for Iraq (restore took 2 min; the database grew by about 450 MB). The restored tables are owned by the connecting
+  user and carry no grants: a service that connects as another role needs `GRANT USAGE ON SCHEMA redoz` and `SELECT` on its tables.
 * Run `npm run db:migrate` on every deploy (it is idempotent, e.g. as a release command); never `db:import-osm`.
 * Check: `GET /api/search?q=...` answers; before the data exists it answers `503 GEO_DATA_NOT_READY`.
 
@@ -191,6 +206,7 @@ database and is skipped unless `GEO_TEST_DATABASE_URL` is set:
 
 ```bash
 GEO_TEST_DATABASE_URL=postgresql://postgres:<password>@127.0.0.1:5432/redoz node --test test/geoDatabase.test.js
+# with DATABASE_SCHEMA=redoz, also: GEO_TEST_DATABASE_SCHEMA=redoz (and GEO_TEST_DATABASE_SSL=no-verify for a TLS host)
 ```
 
 ## Limitations

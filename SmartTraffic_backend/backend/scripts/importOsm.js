@@ -84,6 +84,21 @@ function run(bin, args, env) {
   });
 }
 
+/**
+ * `osm2pgsql --create` replaces everything it manages in the target schema: its helper tables (planet_osm_*)
+ * and osm2pgsql_properties included. If that schema already holds an import that is not this style's (someone
+ * else's data, or DATABASE_SCHEMA forgotten on a database that uses `public`), stop before anything is dropped.
+ */
+async function refuseForeignImport(pg, schema) {
+  const found = await pg.query("SELECT to_regclass(quote_ident($1) || '.osm2pgsql_properties') AS t", [schema]);
+  if (!found.rows[0].t) return;
+  const { rows } = await pg.query(`SELECT property, value FROM "${schema}".osm2pgsql_properties WHERE property IN ('output', 'style')`);
+  const value = Object.fromEntries(rows.map((r) => [r.property, r.value]));
+  if (value.output === 'flex' && /redoz\.lua$/i.test(value.style || '')) return; // our own earlier import: re-importing is the point
+  throw new Error(`schema "${schema}" already holds an osm2pgsql import that is not this one (output: ${value.output || 'unknown'}, style: ${value.style || 'unknown'}); `
+    + 'importing here would drop its tables. Nothing was changed. Set DATABASE_SCHEMA=redoz (db:migrate and db:import-osm, and the running service) to keep this layer in its own schema.');
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!config.postgres.url) throw new Error('DATABASE_URL is not set');
@@ -97,6 +112,7 @@ async function main() {
     let bytes = null;
     let version = null;
     if (!args.postOnly) {
+      await refuseForeignImport(pg, config.postgres.schema || 'public');
       file = findExtract(args.file);
       bytes = fs.statSync(file).size;
       const bin = process.env.OSM2PGSQL_BIN || 'osm2pgsql';
@@ -111,7 +127,11 @@ async function main() {
       // --create replaces only the four osm_* tables of the style; --slim is needed for areas and
       // boundaries, --drop removes the slim helper tables afterwards (no updates are planned: a new
       // extract is re-imported whole).
-      await run(bin, ['--create', '--slim', '--drop', '--output=flex', `--style=${STYLE}`, `--cache=${cache}`, `--number-processes=${procs}`, ...conn, file], env);
+      // DATABASE_SCHEMA puts the four tables, osm2pgsql's own properties table and its slim helper tables
+      // in that schema (redoz.lua reads REDOZ_SCHEMA), so tables of the same name elsewhere are never touched.
+      const schema = config.postgres.schema;
+      const schemaArgs = schema ? ['--schema', schema] : [];
+      await run(bin, ['--create', '--slim', '--drop', '--output=flex', `--style=${STYLE}`, `--cache=${cache}`, `--number-processes=${procs}`, ...schemaArgs, ...conn, file], { ...env, REDOZ_SCHEMA: schema });
       console.log(`[db:import-osm] osm2pgsql finished in ${Math.round((Date.now() - started) / 1000)} s`);
     } else {
       runId = (await pg.query("INSERT INTO osm_import_runs (source_file) VALUES ('(post-import only)') RETURNING id")).rows[0].id;
@@ -143,7 +163,11 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(`[db:import-osm] failed: ${err.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`[db:import-osm] failed: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { refuseForeignImport };

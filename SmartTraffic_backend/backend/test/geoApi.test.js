@@ -175,6 +175,77 @@ test('the geographic endpoints answer 503 FEATURE_DISABLED without DATABASE_URL,
   } finally { await t.close(); }
 });
 
+test('DATABASE_SCHEMA puts the layer first on the search_path and is validated like an identifier', async () => {
+  const poolOptions = async (schema) => {
+    let seen = null;
+    const pg = createPostgres({
+      config: { url: 'postgresql://u:secret@h/d', ssl: 'false', poolMax: 1, statementTimeoutMs: 1000, schema },
+      log: { warn() {} },
+      PoolImpl: function Pool(options) { seen = options; return { on() {}, query: async () => ({ rows: [] }), end: async () => {} }; },
+    });
+    await pg.query('SELECT 1');
+    return seen.options;
+  };
+  assert.equal(await poolOptions('redoz'), '-c search_path=redoz,public');
+  assert.equal(await poolOptions(''), undefined, 'no schema: the default search_path, nothing changes');
+  const load = (value) => {
+    const saved = process.env.DATABASE_SCHEMA;
+    process.env.DATABASE_SCHEMA = value;
+    delete require.cache[require.resolve('../config')];
+    try { return require('../config').postgres.schema; } finally {
+      if (saved === undefined) delete process.env.DATABASE_SCHEMA; else process.env.DATABASE_SCHEMA = saved;
+      delete require.cache[require.resolve('../config')];
+    }
+  };
+  assert.equal(load(' Redoz '), 'redoz');
+  for (const bad of ['public', 'pg_catalog', 'a b', 'x;drop schema y', '"q"', '1abc']) assert.throws(() => load(bad), /DATABASE_SCHEMA/, bad);
+});
+
+test('DATABASE_SSL is the only TLS setting: sslmode in a copied connection string cannot override it', async () => {
+  const { withoutSslParams } = require('../db/postgres');
+  assert.equal(withoutSslParams('postgresql://u:p%40ss@h:5432/db?sslmode=require'), 'postgresql://u:p%40ss@h:5432/db');
+  assert.equal(withoutSslParams('postgresql://u:p@h/db?application_name=x&sslmode=verify-full&uselibpqcompat=true'), 'postgresql://u:p@h/db?application_name=x');
+  assert.equal(withoutSslParams('postgresql://u:p@h/db'), 'postgresql://u:p@h/db', 'nothing to strip: untouched');
+  assert.equal(withoutSslParams('not a url'), 'not a url');
+  let seen = null;
+  const pg = createPostgres({
+    config: { url: 'postgresql://u:secret@h/d?sslmode=require', ssl: 'no-verify', poolMax: 1, statementTimeoutMs: 1000 },
+    log: { warn() {} },
+    PoolImpl: function Pool(options) { seen = options; return { on() {}, query: async () => ({ rows: [] }), end: async () => {} }; },
+  });
+  await pg.query('SELECT 1');
+  assert.equal(seen.connectionString, 'postgresql://u:secret@h/d');
+  assert.deepEqual(seen.ssl, { rejectUnauthorized: false });
+});
+
+test('with DATABASE_SCHEMA the migration creates the schema and puts PostGIS and pg_trgm in public first', async () => {
+  const { migrate } = require('../db/migrate');
+  const seen = [];
+  const pg = {
+    async query(sql) { seen.push(sql.replace(/\s+/g, ' ').trim()); return { rows: [] }; },
+    async transaction(work) { return work({ query: async () => ({ rows: [] }) }); },
+  };
+  await migrate({ pg, schema: 'redoz', dir: require('path').join(__dirname, '..', 'db', 'migrations'), log: { log() {} } });
+  assert.deepEqual(seen.slice(0, 3), ['CREATE SCHEMA IF NOT EXISTS "redoz"', 'CREATE EXTENSION IF NOT EXISTS postgis SCHEMA public', 'CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public']);
+  seen.length = 0;
+  await migrate({ pg, dir: require('path').join(__dirname, '..', 'db', 'migrations'), log: { log() {} } });
+  assert.ok(!seen.some((q) => /CREATE (SCHEMA|EXTENSION)/.test(q)), 'without a schema nothing changes');
+});
+
+test('the OSM import refuses a schema that already holds somebody else\'s osm2pgsql import', async () => {
+  const { refuseForeignImport } = require('../scripts/importOsm');
+  const pgWith = (props) => ({
+    async query(sql) {
+      if (/to_regclass/.test(sql)) return { rows: [{ t: props ? 'osm2pgsql_properties' : null }] };
+      return { rows: Object.entries(props || {}).map(([property, value]) => ({ property, value })) };
+    },
+  });
+  await refuseForeignImport(pgWith(null), 'public'); // no properties table: nothing to protect
+  await refuseForeignImport(pgWith({ output: 'flex', style: 'C:\\app\\db\\osm\\redoz.lua' }), 'redoz'); // our own earlier import
+  await assert.rejects(refuseForeignImport(pgWith({ output: 'pgsql', style: 'C:\\osm\\default.style' }), 'public'), /already holds an osm2pgsql import.*DATABASE_SCHEMA=redoz/s);
+  await assert.rejects(refuseForeignImport(pgWith({ output: 'flex', style: '/home/me/other.lua' }), 'public'), /not this one/);
+});
+
 test('database errors become stable, non-leaky answers', async () => {
   const mapped = async (code, message = 'x') => {
     const pool = {

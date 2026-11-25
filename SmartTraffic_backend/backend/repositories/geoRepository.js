@@ -37,6 +37,15 @@ const point = (latParam, lngParam) => `ST_SetSRID(ST_MakePoint(${lngParam}::floa
 const NEAR_RADIUS_M = 40_000;
 const CATEGORY_RADIUS_M = 50_000;
 
+/**
+ * Transaction-local settings of every search. Trigram thresholds looser than the defaults (0.3 / 0.6) so a
+ * misspelled name still reaches the ranking. enable_seqscan off: the planner prices pg_trgm's operators as
+ * almost free, so for some words ("cafe" near a big city) it picks a sequential pass over all of
+ * search_names (measured 1.1 s) instead of the GIN / prefix indexes (81 ms). Every table the search reads
+ * has an index that serves it, so the index plan is always available.
+ */
+const SEARCH_SETTINGS_SQL = "SELECT set_config('pg_trgm.similarity_threshold', '0.25', true), set_config('pg_trgm.word_similarity_threshold', '0.45', true), set_config('enable_seqscan', 'off', true)";
+
 /** The SQL and its parameters for one search; the text differs by whether a position / categories exist. */
 function buildSearch({
   q, cats, near, limit, offset,
@@ -138,8 +147,7 @@ function createGeoRepository({ pg }) {
                                 WHERE n.q <> '' AND (ct.term_norm = n.q OR similarity(ct.term_norm, n.q) >= 0.7)), '{}'::text[]) AS cats
           FROM (SELECT redoz_normalize($1) AS q) n`, [query]);
         if (!q) return { normalized: '', rows: [] };
-        // Looser than the defaults (0.3 / 0.6) so a misspelled name still reaches the ranking.
-        await client.query("SELECT set_config('pg_trgm.similarity_threshold', '0.25', true), set_config('pg_trgm.word_similarity_threshold', '0.45', true)");
+        await client.query(SEARCH_SETTINGS_SQL);
         const { sql, params } = buildSearch({
           q, cats, near, limit, offset,
         });
@@ -272,4 +280,4 @@ function createGeoRepository({ pg }) {
   };
 }
 
-module.exports = { createGeoRepository, buildSearch };
+module.exports = { createGeoRepository, buildSearch, SEARCH_SETTINGS_SQL };

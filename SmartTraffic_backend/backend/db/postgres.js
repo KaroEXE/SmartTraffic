@@ -18,6 +18,20 @@ function sslOption(mode) {
   return false;
 }
 
+/**
+ * The URL without its TLS parameters. pg lets `?sslmode=` in the URL override the `ssl` option, and turns
+ * `sslmode=require` into full certificate verification, which fails against a managed host's own CA. A
+ * connection string copied from a provider usually carries one, so DATABASE_SSL is the only TLS setting.
+ */
+function withoutSslParams(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return url; }
+  const names = ['sslmode', 'ssl', 'uselibpqcompat'].filter((n) => parsed.searchParams.has(n));
+  if (!names.length) return url;
+  names.forEach((n) => parsed.searchParams.delete(n));
+  return parsed.toString();
+}
+
 /** Connection errors (not SQL mistakes) that mean "the database is not reachable right now". */
 const UNREACHABLE = new Set(['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', '57P01', '57P02', '57P03', '53300', '08006', '08001', '08004', '28P01']);
 
@@ -31,12 +45,15 @@ function createPostgres({
     if (!enabled) throw new ApiError(503, 'FEATURE_DISABLED', 'Place search is disabled: the geographic database is not configured (DATABASE_URL)');
     if (!pool) {
       pool = new PoolImpl({
-        connectionString: config.url,
+        connectionString: withoutSslParams(config.url),
         ssl: sslOption(config.ssl),
         max: config.poolMax,
         connectionTimeoutMillis: 5000,
         idleTimeoutMillis: 30_000,
         statement_timeout: config.statementTimeoutMs,
+        // The layer's own schema first (it is validated to a plain identifier in config); "public" stays
+        // on the path for PostGIS and pg_trgm, which live there.
+        options: config.schema ? `-c search_path=${config.schema},public` : undefined,
       });
       // An idle client that dies must not crash the process.
       pool.on('error', (err) => log.warn(`[postgres] idle client error: ${err.code || err.name}`));
@@ -121,4 +138,4 @@ function createPostgres({
   };
 }
 
-module.exports = { createPostgres, sslOption };
+module.exports = { createPostgres, sslOption, withoutSslParams };

@@ -82,6 +82,16 @@ function corsSettings(raw, production) {
 }
 
 /** Express "trust proxy": blank = off, true/false, a hop count, or an address list. */
+/** DATABASE_SCHEMA -> a plain lower-case identifier (it is placed in SQL), or '' for the default schema. */
+function schemaName(raw) {
+  const name = String(raw || '').trim().toLowerCase();
+  if (!name) return '';
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(name) || name === 'public' || name.startsWith('pg_') || name === 'information_schema') {
+    throw new Error('DATABASE_SCHEMA must be a plain lower-case name (letters, digits, underscore), not "public" or a system schema');
+  }
+  return name;
+}
+
 function trustProxy(raw) {
   const value = (raw || '').trim();
   if (!value || value.toLowerCase() === 'false') return false;
@@ -177,6 +187,9 @@ const config = {
     // DATABASE_SSL: "false" (default, same private network / local), "true" (TLS, verify the certificate),
     // "no-verify" (TLS without checking the certificate: some managed hosts use their own CA).
     ssl: (process.env.DATABASE_SSL || 'false').trim().toLowerCase(),
+    // DATABASE_SCHEMA: keep every table of this layer in its own schema (e.g. "redoz") instead of "public",
+    // so a database that already holds other data is left alone. Empty = "public". Created by db:migrate.
+    schema: schemaName(process.env.DATABASE_SCHEMA),
     poolMax: Math.max(1, Math.round(num('DATABASE_POOL_MAX', 10))),
     // A search or reverse-geocode query running longer than this is cancelled by the server.
     statementTimeoutMs: Math.max(500, Math.round(num('DATABASE_STATEMENT_TIMEOUT_MS', 5000))),

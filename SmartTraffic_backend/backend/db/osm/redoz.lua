@@ -12,8 +12,14 @@
 
 local SRID = 4326
 
+-- Schema of the four tables (and, with --schema, of osm2pgsql's own tables). Set by scripts/importOsm.js from
+-- DATABASE_SCHEMA; unset or empty = osm2pgsql's default, "public".
+local SCHEMA = os.getenv('REDOZ_SCHEMA')
+if SCHEMA == '' then SCHEMA = nil end
+
 local places = osm2pgsql.define_table({
   name = 'osm_places',
+  schema = SCHEMA,
   ids = { type = 'any', type_column = 'osm_type', id_column = 'osm_id' },
   columns = {
     { column = 'name', type = 'text' },
@@ -32,6 +38,7 @@ local places = osm2pgsql.define_table({
 
 local roads = osm2pgsql.define_table({
   name = 'osm_roads',
+  schema = SCHEMA,
   ids = { type = 'way', id_column = 'osm_id' },
   columns = {
     { column = 'name', type = 'text' },
@@ -54,6 +61,7 @@ local roads = osm2pgsql.define_table({
 
 local addresses = osm2pgsql.define_table({
   name = 'osm_addresses',
+  schema = SCHEMA,
   ids = { type = 'any', type_column = 'osm_type', id_column = 'osm_id' },
   columns = {
     { column = 'housenumber', type = 'text' },
@@ -70,6 +78,7 @@ local addresses = osm2pgsql.define_table({
 
 local admin_areas = osm2pgsql.define_table({
   name = 'osm_admin_areas',
+  schema = SCHEMA,
   ids = { type = 'relation', id_column = 'osm_id' },
   columns = {
     { column = 'name', type = 'text' },

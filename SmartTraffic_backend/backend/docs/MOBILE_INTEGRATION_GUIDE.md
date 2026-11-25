@@ -20,6 +20,40 @@ where marked).
 
 ---
 
+## Where the data lives (read this first)
+
+The backend keeps two databases with separate jobs. Nothing is shared between them, and the app never talks to either:
+it only calls the API.
+
+| Store | What it holds | Features of the app that depend on it |
+|---|---|---|
+| **PostgreSQL + PostGIS** (the geographic database) | OpenStreetMap data of **Iraq** (extract of 17 Nov 2026: about 128k places of interest, 32k streets, 22k settlements, 1.7k administrative areas, 47k addresses, 596k road segments) and the places Redoz adds itself | Place search, search-as-you-type, "restaurant near me", address at a point (reverse geocoding), places around a point (fuel, hospital, pharmacy, ...), the nearest road. Endpoints: `/places/search`, `/places/reverse`, `/places/nearby`, `GET /api/search`, `GET /api/geocode/reverse` |
+| **MongoDB** | Users and logins, saved places, the operator's own places ("Hawr places"), road features (cameras, bumps, closures), community reports and votes, and the history of traffic observations | Sign up and sign in, `/saved-places`, `/places/local`, `/road-features`, `/reports`, and the road alerts inside route answers |
+| Live memory of the signal engine | The latest AI camera reading of each monitored intersection | `/traffic` and the live delay inside route answers |
+| Routing provider (Geoapify, or an own OSRM server) | Road geometry and turn-by-turn steps | `POST /routes` (the only call that leaves our servers) |
+
+What this means for the app:
+
+- **Search and places never need an account or a token**, and they never depend on MongoDB being up. Accounts, saved places,
+  reports and road features never depend on the geographic database being up. A failure of one store does not stop the
+  other one's endpoints.
+- **Coverage is Iraq.** A search or a reverse lookup outside Iraq returns nothing (an empty list / `displayName: null`), not an
+  error. The map bounds in `GET /config` are the area to show.
+- **Data is a snapshot of OpenStreetMap**, not live. A place missing there is missing here. Operators can add important places
+  (Hawr places) in the admin console; they come first in `/places/search` (if MongoDB is down they are left out and the other results still come).
+- **Speed:** a search or nearby request takes tens of milliseconds on the server (typically 50-150 ms); the rest is the
+  network. Debounce typing (300-500 ms) and cancel the previous request.
+- **Never store a place by its `id`**, store its coordinates (and name). Ids are opaque and the map data is refreshed from time to time.
+- **If the geographic database is unavailable** its endpoints answer `503` with `GEO_DATABASE_UNAVAILABLE` or
+  `GEO_QUERY_TIMEOUT` (retry after a few seconds: the `Retry-After` header and the `retryAfterSeconds` field say how long),
+  `GEO_DATA_NOT_READY` (the map data is not loaded yet) or `FEATURE_DISABLED` (not configured). Show "search is temporarily
+  unavailable" and keep the rest of the app working. Check `GET /config` → `features.placeSearch.available` at start-up. If
+  MongoDB is unavailable, the endpoints that need it answer `503 DATABASE_UNAVAILABLE`, and routes still work (their
+  `roadAlertsStatus` is then `unavailable`).
+- **Attribution is required** wherever search results or places are shown: `© OpenStreetMap contributors` (see "Attribution").
+
+---
+
 ## 1. Base URL and versioning
 
 | Environment | Base URL |

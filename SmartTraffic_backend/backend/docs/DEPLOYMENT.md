@@ -31,7 +31,8 @@ simulation can still be watched. `CORS_ORIGIN=*` prints a warning.
 | `NODE_ENV` | `production` |
 | `MONGODB_URI` | Atlas connection string (secret) |
 | `DATABASE_URL` | connection string of the PostgreSQL/PostGIS database that holds the OpenStreetMap data (secret; on Northflank the PostgreSQL addon's connection string). Search, reverse geocoding and nearby places run on it. See [GEO_DATABASE.md](GEO_DATABASE.md#production-northflank). |
-| `DATABASE_SSL` | `false` on a private network, `true` or `no-verify` when the host requires TLS |
+| `DATABASE_SSL` | `no-verify` for the Northflank PostgreSQL addon (it requires TLS, also on its private network). `false` only for a local database; `true` verifies the certificate. A `?sslmode=` in `DATABASE_URL` is ignored. |
+| `DATABASE_SCHEMA` | `redoz` when the database already holds other data (all of this layer's tables then live in that schema). Same value for the service, `db:migrate` and `db:import-osm`. |
 | `GEOAPIFY_API_KEY` | routing only: Geoapify key limited to the server's IP address (secret), unless `ROUTING_OSRM_URL` is set |
 | `GEOAPIFY_DAILY_REQUEST_LIMIT` | sized to the plan (default 2500; the free plan is 3,000 credits a day) |
 | `ROUTING_OSRM_URL` | optional: your own OSRM server (no credits, real alternatives) |
@@ -97,6 +98,31 @@ static outbound addresses.
 - Keep the attribution on every map, search result and route ("© OpenStreetMap contributors" for search and places,
   "Powered by Geoapify" for routes): the pages show it, and `attribution` / `searchAttribution` in `GET /api/client-config`
   and in the answers carry it.
+
+## Own routing server (no Geoapify)
+
+Search, places and reverse geocoding already run on your PostgreSQL data. Routes are the one call that still goes to
+Geoapify. A database of roads cannot compute routes by itself: a routing engine has to read the road network, and this
+backend speaks to **OSRM** (`ROUTING_OSRM_URL`, see `services/navigation/routingService.js`). With it set, every route
+comes from your own server (real alternatives, no daily credit limit) and Geoapify is not called at all.
+
+`routing/Dockerfile` builds that server from the same OpenStreetMap data of Iraq:
+
+1. In Northflank, in the **same project** as the backend, create a **new service** from this repository with
+   the Dockerfile `backend/routing/Dockerfile` and build context `backend/routing`.
+2. Give it port **5000**, **internal only** (no public domain: only the backend calls it). The build downloads the
+   extract and runs OSRM's `osrm-extract`, `osrm-partition` and `osrm-customize`; the image then only runs `osrm-routed`.
+   Give the build and the running service enough memory: plan for roughly 2 GB while building and 1 GB while running as a
+   starting point, and raise it if the build is killed (these figures are an estimate, not measured here).
+3. Check it from inside the project (or with `northflank forward`):
+   `GET /route/v1/driving/45.4329,35.5617;45.4418,35.5702?overview=false` answers `"code":"Ok"` with a route.
+4. On the **backend** service set `ROUTING_OSRM_URL=http://<routing service internal host>:5000` and redeploy. Then
+   `GET /api/v1/config` shows `features.routing.provider: "osrm"`, and `GEOAPIFY_API_KEY` is no longer needed (you can remove it).
+5. Refresh the roads by rebuilding the routing service's image (it downloads the newest extract).
+
+The road data is OpenStreetMap, like the places, so the attribution stays `© OpenStreetMap contributors`. OSRM's `car`
+profile routes cars on roads with their one-ways and turn restrictions as OpenStreetMap has them; it has no live
+traffic, which this backend adds itself from the AI cameras.
 
 ## Mobile app
 
